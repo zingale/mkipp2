@@ -943,7 +943,7 @@ class KippenhahnDiagram:
             Colormap for the filled contours. Defaults to ``'Blues'``
             for most data, and ``'RdBu_r'`` for ``'net_nuclear_energy'``.
         core_masses : sequence of {'He', 'C', 'O', 'CO', 'ONe', 'Fe'}, optional
-            Core masses to overlay when ``yaxis='mass'``. Defaults to He, C, O;
+            Core masses to overlay when ``yaxis='mass'``. Defaults to He, CO, ONe;
             an empty sequence suppresses them.
         density_contours : sequence of float, optional
             Densities in g/cm^3 to overlay as gray lines with inline density
@@ -1153,7 +1153,7 @@ class KippenhahnDiagram:
                 level_style = "symmetric"
 
         if core_masses is None:
-            core_masses = ["He", "C", "O"]
+            core_masses = ["He", "CO", "ONe"]
 
         if contour_colormap is None:
             if burning_regions or self.identifier == "net_nuclear_energy":
