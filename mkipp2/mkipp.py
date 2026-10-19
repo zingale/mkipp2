@@ -183,10 +183,11 @@ class KippenhahnDiagram:
 
     Notes
     -----
-    All parameters are keyword-only and are stored as instance attributes,
-    with defaults resolved as described above. Construction immediately
-    reads the input files and computes both data products; changing input
-    settings afterward does not recompute them.
+    All parameters are keyword-only and exposed as read-only properties,
+    with defaults resolved as described above. Sequence settings are copied
+    into tuples. Construction immediately reads the input files and computes
+    both data products. Create a new diagram to change input settings;
+    rendering options can be changed on each call to ``plot()``.
 
     """
 
@@ -213,52 +214,139 @@ class KippenhahnDiagram:
         if logs_dirs is None:
             logs_dirs = ['LOGS']
 
-        self.logs_dirs = [md.resolve_logs_dir(log_dir) for log_dir in logs_dirs]
-        self.clean_data = clean_data
+        self._logs_dirs = tuple(md.resolve_logs_dir(log_dir) for log_dir in logs_dirs)
+        self._clean_data = clean_data
 
         if extra_history_cols is None:
             extra_history_cols = []
-        self.extra_history_cols = extra_history_cols
+        self._extra_history_cols = tuple(extra_history_cols)
 
-        self.identifier = identifier
+        self._identifier = identifier
         if extractor is None:
-            self.extractor = default_extractor
+            self._extractor = default_extractor
         else:
-            self.extractor = extractor
-        self.log10_on_data = log10_on_data
+            self._extractor = extractor
+        self._log10_on_data = log10_on_data
 
         # override for fields where the log is done by MESA
-        if self.identifier == "net_nuclear_energy":
-            self.log10_on_data = False
+        if self._identifier == "net_nuclear_energy":
+            self._log10_on_data = False
 
-        self.xaxis = xaxis
-        self.xaxis_divide = xaxis_divide
-        self.time_units = time_units
-        self.function_on_xaxis = function_on_xaxis
-        self.yaxis = yaxis
+        self._xaxis = xaxis
+        self._xaxis_divide = xaxis_divide
+        self._time_units = time_units
+        self._function_on_xaxis = function_on_xaxis
+        self._yaxis = yaxis
 
-        self.yresolution = yresolution
-        self.mass_tolerance = mass_tolerance
-        self.radius_tolerance = radius_tolerance
-        self.xlims = xlims
+        self._yresolution = yresolution
+        self._mass_tolerance = mass_tolerance
+        self._radius_tolerance = radius_tolerance
+        self._xlims = tuple(xlims) if xlims is not None else None
 
-        # Fill profile and history names if unspecified
-        if profile_paths is None:
-            profile_paths = []
-        self.profile_paths = profile_paths
-        if len(self.profile_paths) == 0:
-            self.profile_paths = md.get_profile_paths(logs_dirs=self.logs_dirs)
+        # Discover unspecified paths and store immutable copies of sequences.
+        self._profile_paths = tuple(profile_paths) if profile_paths is not None else ()
+        if not self.profile_paths:
+            self._profile_paths = tuple(md.get_profile_paths(logs_dirs=self.logs_dirs))
 
-        if history_paths is None:
-            history_paths = []
-        self.history_paths = history_paths
-        if len(self.history_paths) == 0:
-            self.history_paths = []
-            for log_dir in self.logs_dirs:
-                self.history_paths.append(log_dir+"/history.data")
+        self._history_paths = tuple(history_paths) if history_paths is not None else ()
+        if not self.history_paths:
+            self._history_paths = tuple(log_dir + "/history.data" for log_dir in self.logs_dirs)
 
         self.xyz_data = self._build_xyz_data()
         self.mixing_zones = self._build_mixing_zones()
+
+    @property
+    def logs_dirs(self):
+        """Return the fixed ``logs_dirs`` setting."""
+        return self._logs_dirs
+
+    @property
+    def profile_paths(self):
+        """Return the fixed ``profile_paths`` setting."""
+        return self._profile_paths
+
+    @property
+    def history_paths(self):
+        """Return the fixed ``history_paths`` setting."""
+        return self._history_paths
+
+    @property
+    def clean_data(self):
+        """Return the fixed ``clean_data`` setting."""
+        return self._clean_data
+
+    @property
+    def extra_history_cols(self):
+        """Return the fixed ``extra_history_cols`` setting."""
+        return self._extra_history_cols
+
+    @property
+    def identifier(self):
+        """Return the fixed ``identifier`` setting."""
+        return self._identifier
+
+    @property
+    def extractor(self):
+        """Return the fixed ``extractor`` setting."""
+        return self._extractor
+
+    @property
+    def log10_on_data(self):
+        """Return the fixed ``log10_on_data`` setting."""
+        return self._log10_on_data
+
+    @property
+    def xaxis(self):
+        """Return the fixed ``xaxis`` setting."""
+        return self._xaxis
+
+    @property
+    def xaxis_divide(self):
+        """Return the fixed ``xaxis_divide`` setting."""
+        return self._xaxis_divide
+
+    @property
+    def time_units(self):
+        """Return the fixed ``time_units`` setting."""
+        return self._time_units
+
+    @property
+    def function_on_xaxis(self):
+        """Return the fixed ``function_on_xaxis`` setting."""
+        return self._function_on_xaxis
+
+    @property
+    def yaxis(self):
+        """Return the fixed ``yaxis`` setting."""
+        return self._yaxis
+
+    @property
+    def yresolution(self):
+        """Return the fixed ``yresolution`` setting."""
+        return self._yresolution
+
+    @property
+    def mass_tolerance(self):
+        """Return the fixed ``mass_tolerance`` setting."""
+        return self._mass_tolerance
+
+    @property
+    def radius_tolerance(self):
+        """Return the fixed ``radius_tolerance`` setting."""
+        return self._radius_tolerance
+
+    @property
+    def xlims(self):
+        """Return the fixed ``xlims`` setting."""
+        return self._xlims
+
+    @property
+    def _xaxis_divisor(self):
+        """Return the coordinate divisor, applying stellar-age unit overrides."""
+        if self.xaxis == "star_age":
+            return {"1000 yr": 1000, "Myr": 1e6, "Gyr": 1e9}.get(
+                self.time_units, self.xaxis_divide)
+        return self.xaxis_divide
 
     def _build_mixing_zones(self):
         """Construct mixing-region paths and stellar surface coordinates.
@@ -288,14 +376,7 @@ class KippenhahnDiagram:
         their overlapping vertical intervals into :class:`Zone` boundaries.
 
         """
-        xaxis_divide = self.xaxis_divide
-        if self.xaxis == "star_age":
-            if self.time_units == "1000 yr":
-                xaxis_divide = 1000
-            elif self.time_units == "Myr":
-                xaxis_divide = 1e6
-            elif self.time_units == "Gyr":
-                xaxis_divide = 1e9
+        xaxis_divide = self._xaxis_divisor
 
         if self.yaxis == "radius":
             type_prefix, top_prefix = "mix_relr_type_", "mix_relr_top_"
@@ -471,14 +552,7 @@ class KippenhahnDiagram:
         points above the stellar surface are not masked here.
 
         """
-        xaxis_divide = self.xaxis_divide
-        if self.xaxis == "star_age":
-            if self.time_units == "1000 yr":
-                xaxis_divide = 1000
-            elif self.time_units == "Myr":
-                xaxis_divide = 1e6
-            elif self.time_units == "Gyr":
-                xaxis_divide = 1e9
+        xaxis_divide = self._xaxis_divisor
 
         # Extract data from profiles
         max_x_coord = float('-inf')
@@ -679,14 +753,7 @@ class KippenhahnDiagram:
         the optional show call.
 
         """
-        xaxis_divide = self.xaxis_divide
-        if self.xaxis == "star_age":
-            if self.time_units == "1000 yr":
-                xaxis_divide = 1000
-            elif self.time_units == "Myr":
-                xaxis_divide = 1e6
-            elif self.time_units == "Gyr":
-                xaxis_divide = 1e9
+        xaxis_divide = self._xaxis_divisor
 
         if axis is None:
             fig, axis = plt.subplots()
