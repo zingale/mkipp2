@@ -26,7 +26,7 @@ def plot3():
 
     fig, axis = plt.subplots()
 
-    # mkipp2.KippenhahnDiagram returns an object containing
+    # k.plot() returns an object containing
     #   .contour_plot : the return value of matplotlibs contourf. Can be
     #                            used to create a colorbar with plt.colorbar()
     #   .histories    : list of history files read. data can be accessed
