@@ -861,7 +861,8 @@ class KippenhahnDiagram:
              show_over=True,
              show_rot=False,
              save_file=True,
-             save_filename="Kippenhahn.png"):
+             save_filename="Kippenhahn.png",
+             size=(7, 5)):
         """Draw profile contours, mixing boundaries, and stellar structure.
 
         Parameters
@@ -919,6 +920,8 @@ class KippenhahnDiagram:
         save_filename : str, optional
             Output filename; its extension determines the format. Defaults to
             ``'Kippenhahn.png'``.
+        size : tuple
+            Figure size (width, height) in inches.
 
         Returns
         -------
@@ -964,6 +967,7 @@ class KippenhahnDiagram:
             show_rot=show_rot,
             save_file=save_file,
             save_filename=save_filename,
+            size=size
         )
 
     def _plot_history_burning(self, axis, colormap, levels):
@@ -1018,25 +1022,26 @@ class KippenhahnDiagram:
         return self._plot(burning_regions=True, **kwargs)
 
     def _plot(self, *,
-             burning_regions=False,
-             axis=None,
-             contour_colormap=None,
-             core_masses=None,
-             density_contours=None,
-             decorate_plot=True,
-             levels=None,
-             level_style=None,
-             num_levels=8,
-             show_mixing_legend=True,
-             show_core_mass_legend=True,
-             show_plot=False,
-             show_conv=True,
-             show_therm=True,
-             show_semi=True,
-             show_over=True,
-             show_rot=False,
-             save_file=True,
-             save_filename="Kippenhahn.png"):
+              burning_regions=False,
+              axis=None,
+              contour_colormap=None,
+              core_masses=None,
+              density_contours=None,
+              decorate_plot=True,
+              levels=None,
+              level_style=None,
+              num_levels=8,
+              show_mixing_legend=True,
+              show_core_mass_legend=True,
+              show_plot=False,
+              show_conv=True,
+              show_therm=True,
+              show_semi=True,
+              show_over=True,
+              show_rot=False,
+              save_file=True,
+              save_filename="Kippenhahn.png",
+              size=(7, 5)):
         """Render either data source with the shared overlays and decorations."""
         xaxis_divide = self._xaxis_divisor
 
@@ -1054,6 +1059,7 @@ class KippenhahnDiagram:
 
         if axis is None:
             fig, axis = plt.subplots()
+            fig.set_size_inches(size)
         else:
             fig = axis.figure
 
