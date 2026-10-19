@@ -15,6 +15,34 @@ import mkipp2.kipp_data as kipp
 import mkipp2.mesa_data as md
 
 
+def default_extractor(identifier, log10_on_data, prof,
+                      return_data_columns=False):
+    """Extract a profile column or report the column required to read it.
+
+    Parameters
+    ----------
+    identifier : str
+        Profile column name.
+    log10_on_data : bool
+        If True, return ``log10(abs(data) + 1e-99)``.
+    prof : mesa_data.mesa_data or None
+        Loaded profile. May be None when requesting column names.
+    return_data_columns : bool, optional
+        Return required column names instead of data. Default is False.
+
+    Returns
+    -------
+    numpy.ndarray or list of str
+        Extracted values, optionally transformed, or ``[identifier]`` when
+        ``return_data_columns`` is True.
+    """
+    if return_data_columns:
+        return [identifier]
+    if log10_on_data:
+        return np.log10(abs(prof.get(identifier))+1e-99)
+    return prof.get(identifier)
+
+
 # Create contour levels array (TBD: Need to be improved)
 def get_levels_linear(lmin, lmax, n_levels):
     """Generate evenly spaced contour levels around a data range.
@@ -147,11 +175,11 @@ class KippenhahnDiagram:
     ----------
     xyz_data : namedtuple
         Interpolated profile data with fields ``xlims``, ``X``, ``Y``, and
-        ``Z``, returned by `kipp_data.get_xyz_data`.
+        ``Z``, prepared during construction.
     mixing_zones : namedtuple
         Mixing-region paths and history data with fields ``zones``,
-        ``mix_types``, ``x_coords``, ``y_coords``, and ``histories``, returned
-        by `get_mixing_zones`.
+        ``mix_types``, ``x_coords``, ``y_coords``, and ``histories``, prepared
+        during construction.
 
     Notes
     -----
@@ -194,7 +222,7 @@ class KippenhahnDiagram:
 
         self.identifier = identifier
         if extractor is None:
-            self.extractor = self.default_extractor
+            self.extractor = default_extractor
         else:
             self.extractor = extractor
         self.log10_on_data = log10_on_data
@@ -229,37 +257,10 @@ class KippenhahnDiagram:
             for log_dir in self.logs_dirs:
                 self.history_paths.append(log_dir+"/history.data")
 
-        self.xyz_data = self.get_xyz_data()
-        self.mixing_zones = self.get_mixing_zones()
+        self.xyz_data = self._build_xyz_data()
+        self.mixing_zones = self._build_mixing_zones()
 
-    def default_extractor(self, identifier, log10_on_data, prof,
-                          return_data_columns=False):
-        """Extract a profile column or report the column required to read it.
-
-        Parameters
-        ----------
-        identifier : str
-            Profile column name.
-        log10_on_data : bool
-            If True, return ``log10(abs(data) + 1e-99)``.
-        prof : mesa_data.mesa_data or None
-            Loaded profile. May be None when requesting column names.
-        return_data_columns : bool, optional
-            Return required column names instead of data. Default is False.
-
-        Returns
-        -------
-        numpy.ndarray or list of str
-            Extracted values, optionally transformed, or ``[identifier]`` when
-            ``return_data_columns`` is True.
-        """
-        if return_data_columns:
-            return [identifier]
-        if log10_on_data:
-            return np.log10(abs(prof.get(identifier))+1e-99)
-        return prof.get(identifier)
-
-    def get_mixing_zones(self):
+    def _build_mixing_zones(self):
         """Construct mixing-region paths and stellar surface coordinates.
 
         Returns
@@ -441,7 +442,7 @@ class KippenhahnDiagram:
         MixingZones = namedtuple('MixingZones', 'zones mix_types x_coords y_coords histories')
         return MixingZones(zones, mix_types, x_coords, y_coords, histories)
 
-    def get_xyz_data(self):
+    def _build_xyz_data(self):
         """Interpolate a profile quantity onto a common vertical contour grid.
 
         Returns
