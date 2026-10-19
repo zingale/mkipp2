@@ -1,12 +1,6 @@
 """Construct linked mixing-region boundaries for Kippenhahn diagrams."""
 
-import re
-from collections import namedtuple
-
-import numpy as np
 from matplotlib.path import Path
-
-import mkipp2.mesa_data as md
 
 
 class ZoneBlock:
