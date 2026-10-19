@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LinearLocator, FormatStrFormatter
 
 import mkipp2
 
@@ -135,12 +136,27 @@ def multipanel():
     ax2.set_xlim([age_tams, age_hedep])
     ax3.set_xlim([age_hedep, age_odep])
     ax4.set_xlim([age_odep, history.get("star_age")[-1] / 1e6])
+    ax4.xaxis.set_major_locator(LinearLocator(2))
 
-    ax2.set_xlabel("star age (Myr)")
+    for ax in (ax1, ax2, ax3, ax4):
+        ax.ticklabel_format(axis="x", style="plain", useOffset=False)
+
+    ax4.xaxis.set_major_formatter(FormatStrFormatter("%.9f"))
+
+    for ax in (ax1, ax2, ax3, ax4, ax5):
+        ax.tick_params(axis="both", labelsize=9)
+
+    # Keep the long endpoint labels inside ax4 so they don't widen the gaps.
+    ax4_labels = ax4.get_xticklabels()
+    ax4_labels[0].set_horizontalalignment("left")
+    ax4_labels[-1].set_horizontalalignment("right")
+
+    fig.supxlabel("star age (Myr)", x=0.5, ha="center", va="bottom")
     ax1.set_ylabel("Mass (solar masses)")
 
     ax2.yaxis.set_ticklabels([])
     ax3.yaxis.set_ticklabels([])
+    ax4.tick_params(axis="y", labelleft=False)
     fig.savefig("Kipp-split.png")
 
 
