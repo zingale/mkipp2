@@ -112,60 +112,62 @@ def multipanel():
 
     cbar = fig.colorbar(plot.contour_plot, cax=ax5)
     #cbar.ax.set_yticklabels(['0', '','2','','4','','6','','8',''])
-    cbar.set_label(r"$\log_{10}|\epsilon_{\rm nuc}|$")
+    cbar.set_label(r"$\log_{10}|\epsilon_{\rm net}|$")
+
+    # we want to set the widths of each panel according to
+    # the exhaustion of different fuels
 
     history = mkipp2.mesa_data.MesaData("LOGS-mesa-26.04.1.zip/history.data",
-                                        read_data_cols=["star_age", "center_h1", "center_he4", "center_o16"])
-    for i, center_h1 in enumerate(history.get("center_h1")):
-        if center_h1 < 1e-3:
-            age_tams = history.get("star_age")[i] / 1e6
-            break
-    for i, center_he4 in enumerate(history.get("center_he4")):
-        if center_he4 < 1e-3:
-            age_hedep = history.get("star_age")[i] / 1e6
-            ihedep = i
-            break
-    for i, center_o16 in enumerate(history.get("center_o16")):
-        if i < ihedep:
-            continue
-        if center_o16 < 1e-3:
-            age_odep = history.get("star_age")[i] / 1e6
-            break
+                                        read_data_cols=["star_age", "center_h1",
+                                                        "center_he4", "center_o16"])
 
-    ax1.set_xlim([0, age_tams])
-    ax2.set_xlim([age_tams, age_hedep])
-    ax3.set_xlim([age_hedep, age_odep])
-    ax4.set_xlim([age_odep, history.get("star_age")[-1] / 1e6])
-    ax4.xaxis.set_major_locator(LinearLocator(2))
+    nuclei = ["h1", "he4", "o16"]
+    bounds = {}
+    ilast = -1
+    for inuc, nuc in enumerate(nuclei):
+        for i, center_nuc in enumerate(history.get(f"center_{nuc}")):
+            if i < ilast:
+                continue
+            if center_nuc < 1e-3:
+                bounds[nuc] = history.get("star_age")[i] / 1e6
+                ilast = i
+                break
+
+    ax1.set_xlim([0, bounds["h1"]])
+    ax2.set_xlim([bounds["h1"], bounds["he4"]])
+    ax3.set_xlim([bounds["he4"], bounds["o16"]])
+    ax4.set_xlim([bounds["o16"], history.get("star_age")[-1] / 1e6])
 
     for ax in (ax1, ax2, ax3, ax4):
         ax.ticklabel_format(axis="x", style="plain", useOffset=False)
-
-    ax4.xaxis.set_major_formatter(FormatStrFormatter("%.9f"))
-
-    for ax in (ax1, ax2, ax3, ax4, ax5):
         ax.tick_params(axis="both", labelsize=9)
+
+    # for the last panel, the timescale is so short that we need
+    # to finesse the tick labels.
+    ax4.xaxis.set_major_locator(LinearLocator(2))
+    ax4.xaxis.set_major_formatter(FormatStrFormatter("%.9f"))
 
     # Keep the long endpoint labels inside ax4 so they don't widen the gaps.
     ax4_labels = ax4.get_xticklabels()
     ax4_labels[0].set_horizontalalignment("left")
     ax4_labels[-1].set_horizontalalignment("right")
 
-    fig.supxlabel("star age (Myr)", x=0.5, ha="center", va="bottom")
     ax1.set_ylabel("Mass (solar masses)")
+    fig.supxlabel("star age (Myr)", x=0.5, ha="center", va="bottom",
+                  fontsize=ax1.yaxis.label.get_fontsize())
 
-    ax2.yaxis.set_ticklabels([])
-    ax3.yaxis.set_ticklabels([])
-    ax4.tick_params(axis="y", labelleft=False)
+    for ax in (ax2, ax3, ax4):
+        ax.tick_params(axis="y", left=False, right=False,
+                       labelleft=False, labelright=False, which="both")
     fig.savefig("Kipp-split.png")
 
 
 if __name__ == "__main__":
 
-    #basic_plot()
-    #age_plot()
-    #collapse_plot()
-    #density_contours_plot()
-    #si_plot()
-    #burning_regions_plot()
+    basic_plot()
+    age_plot()
+    collapse_plot()
+    density_contours_plot()
+    si_plot()
+    burning_regions_plot()
     multipanel()
