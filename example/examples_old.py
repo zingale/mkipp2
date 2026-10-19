@@ -11,14 +11,15 @@ def plot1():
     # simple example (saves to default filename Kippenhahn.png)
 
     k = mkipp2.KippenhahnDiagram()
-    k.plot()
+    k.plot(core_masses=["He", "C", "O"])
 
 
 def plot2():
     # specify xrange and filename
 
     k = mkipp2.KippenhahnDiagram(xlims=[300, 600])
-    k.plot(save_filename="Kippenhahn2.png")
+    k.plot(core_masses=["He", "C", "O"],
+           save_filename="Kippenhahn2.png")
 
 
 def plot3():
@@ -36,7 +37,8 @@ def plot3():
                                  time_units="Myr",
                                  identifier="y",
                                  log10_on_data=False)
-    plot = k.plot(levels=np.arange(0.0, 1.001, 0.01),
+    plot = k.plot(core_masses=["He", "C", "O"],
+                  levels=np.arange(0.0, 1.001, 0.01),
                   axis=axis, decorate_plot=False, save_file=False)
     cbar = plt.colorbar(plot.contour_plot, pad=0.05)
     cbar.set_label("Helium abundance")
@@ -59,7 +61,8 @@ def plot4():
     k = mkipp2.KippenhahnDiagram(xaxis="star_age",
                                  time_units="yr",
                                  function_on_xaxis=lambda x: np.log10(max_age+0.01 - x))
-    kipp_plot = k.plot(decorate_plot=False, save_file=False, axis=axis)
+    kipp_plot = k.plot(core_masses=["He", "C", "O"],
+                       decorate_plot=False, save_file=False, axis=axis)
     cbar = plt.colorbar(kipp_plot.contour_plot, pad=0.05)
     cbar.set_label("log |eps_nuc|")
     axis.set_xlabel("log (tf-t) [yrs]")
@@ -85,7 +88,8 @@ def plot5():
         return data
 
     k = mkipp2.KippenhahnDiagram(extractor=g_extractor)
-    plot = k.plot(decorate_plot=False, save_file=False, axis=axis)
+    plot = k.plot(core_masses=["He", "C", "O"],
+                  decorate_plot=False, save_file=False, axis=axis)
     cbar = plt.colorbar(plot.contour_plot, pad=0.05)
     cbar.set_label("log g")
     axis.set_xlabel("model_number")
@@ -161,12 +165,15 @@ def plot7():
     ax4 = fig.add_subplot(spec[0, 3])
 
     k = mkipp2.KippenhahnDiagram(xaxis="star_age")
-    k.plot(axis=ax1, num_levels=10,
+    k.plot(core_masses=["He", "C", "O"],
+           axis=ax1, num_levels=10,
            save_file=False, decorate_plot=False)
-    k.plot(axis=ax2, num_levels=10,
+    k.plot(core_masses=["He", "C", "O"],
+           axis=ax2, num_levels=10,
            save_file=False, decorate_plot=False,
            show_mixing_legend=False, show_core_mass_legend=False)
-    plot = k.plot(axis=ax3, num_levels=10,
+    plot = k.plot(core_masses=["He", "C", "O"],
+                  axis=ax3, num_levels=10,
                   save_file=False, decorate_plot=False,
                   show_mixing_legend=False, show_core_mass_legend=False)
     cbar = fig.colorbar(plot.contour_plot, cax=ax4)
