@@ -8,6 +8,9 @@ The HDF5 routines were removed.
 
 LOGS inputs can now be ZIP archives, read directly without extraction.
 
+Density contours can be overlaid as labeled gray lines using
+`plot(density_contours=[...])`, with densities supplied in g/cm³.
+
 ## History
 
 Based on `SimpleMesaKippy.py` and `Kippy.py`.

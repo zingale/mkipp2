@@ -17,6 +17,60 @@ import mkipp2.kipp_data as kipp
 import mkipp2.mesa_data as md
 
 
+def format_scientific(value):
+    """Format a positive finite value as scientific notation for MathText.
+
+    Parameters
+    ----------
+    value : float
+        Positive finite value to format with six significant digits.
+
+    Returns
+    -------
+    str
+        MathText expression without dollar delimiters or units. A coefficient
+        of one is omitted, leaving just the power of ten.
+    """
+    coefficient, exponent = f"{value:.5e}".split("e")
+    coefficient = coefficient.rstrip("0").rstrip(".")
+    power = f"10^{{{int(exponent)}}}"
+    return power if coefficient == "1" else rf"{coefficient}\times {power}"
+
+
+def _visible_contour_midpoint(vertices, axis):
+    """Return the visible arc midpoint in data coordinates and length in pixels."""
+    points = axis.transData.transform(vertices)
+    starts = points[:-1]
+    steps = np.diff(points, axis=0)
+    lower = np.zeros(len(steps))
+    upper = np.ones(len(steps))
+    valid = np.all(np.isfinite(starts) & np.isfinite(steps), axis=1)
+    # Clip each line segment to the axes rectangle, including segments whose
+    # endpoints both lie outside it.
+    for dim, bounds in enumerate(((axis.bbox.xmin, axis.bbox.xmax),
+                                  (axis.bbox.ymin, axis.bbox.ymax))):
+        moving = steps[:, dim] != 0
+        valid &= moving | ((starts[:, dim] >= bounds[0]) & (starts[:, dim] <= bounds[1]))
+        entry = np.zeros(len(steps))
+        leave = np.ones(len(steps))
+        entry[moving] = (bounds[0] - starts[moving, dim]) / steps[moving, dim]
+        leave[moving] = (bounds[1] - starts[moving, dim]) / steps[moving, dim]
+        lower = np.maximum(lower, np.minimum(entry, leave))
+        upper = np.minimum(upper, np.maximum(entry, leave))
+    valid &= upper > lower
+    starts = starts[valid] + lower[valid, None] * steps[valid]
+    steps = (upper - lower)[valid, None] * steps[valid]
+    lengths = np.linalg.norm(steps, axis=1)
+    total = lengths.sum()
+    if total == 0:
+        return None, 0
+    cumulative = np.cumsum(lengths)
+    index = np.searchsorted(cumulative, total / 2)
+    fraction = (total / 2 - (cumulative[index] - lengths[index])) / lengths[index]
+    midpoint = starts[index] + fraction * steps[index]
+    return axis.transData.inverted().transform(midpoint), total
+
+
 def default_extractor(identifier, log10_on_data, prof,
                       return_data_columns=False):
     """Extract a profile column or report the column required to read it.
@@ -646,6 +700,8 @@ class KippenhahnDiagram:
 
         # Initialize interpolation grid
         Z_data_array = np.zeros((self.yresolution, len(profile_paths)))
+        self._log_density = np.full_like(Z_data_array, np.nan)
+        self._missing_density_profiles = []
 
         # XY coordinates for data
         X_data_array = np.zeros((self.yresolution, len(profile_paths)))
@@ -655,7 +711,9 @@ class KippenhahnDiagram:
         for i, profile_name in enumerate(profile_paths):
             try:
                 prof = md.MesaData(profile_name, read_data=False)
-                prof.read_data(columns)
+                density_column = next((name for name in ("logRho", "rho")
+                                       if name in prof.columns), None)
+                prof.read_data(columns + ([density_column] if density_column else []))
             except Exception as e:
                 raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
             x_coord = self.function_on_xaxis(prof.header[self.xaxis] / xaxis_divide)
@@ -691,6 +749,18 @@ class KippenhahnDiagram:
             #    else:
             Z_data_array[:, i] = interp_z_data
 
+            if density_column is None:
+                self._missing_density_profiles.append(str(profile_name))
+            else:
+                log_density = prof.get(density_column)[::-1]
+                if density_column == "rho":
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        log_density = np.log10(log_density)
+                self._log_density[:, i] = np.interp(y_interp, y_data, log_density)
+                # Do not extend density contours beyond this profile's surface.
+                surface = prof.header['star_mass' if self.yaxis == "mass" else 'photosphere_r']
+                self._log_density[y_interp > min(surface, y_data.max()), i] = np.nan
+
         XYZData = namedtuple('XYZData', 'xlims X Y Z')
         return XYZData((min_x_coord, max_x_coord),
                        X_data_array, Y_data_array, Z_data_array)
@@ -699,6 +769,7 @@ class KippenhahnDiagram:
              axis=None,
              contour_colormap=None,
              core_masses=None,
+             density_contours=None,
              decorate_plot=True,
              levels=None,
              level_style=None,
@@ -725,6 +796,14 @@ class KippenhahnDiagram:
         core_masses : sequence of {'He', 'C', 'O', 'CO', 'ONe', 'Fe'}, optional
             Core masses to overlay when ``yaxis='mass'``. Defaults to He, C, O;
             an empty sequence suppresses them.
+        density_contours : sequence of float, optional
+            Densities in g/cm^3 to overlay as gray lines with inline density
+            labels. Values must be finite and positive; they are sorted and
+            deduplicated. None or an empty sequence disables the overlay.
+            Requires ``logRho`` (log10 density) or ``rho`` in every selected
+            profile. Interpolation uses log10 density on the profile grid.
+            Each label is placed halfway along the longest visible contour
+            for that density, with arc length measured in display coordinates.
         decorate_plot : bool, optional
             Add axis labels and a colorbar.  Default is True.
         levels : array_like, optional
@@ -757,7 +836,8 @@ class KippenhahnDiagram:
             Display rotational mixing boundaries. Default is False.
         save_file : bool, optional
             Apply ``Figure.tight_layout()`` and save the figure owning ``axis``
-            after the optional show call. Default is True.
+            after the optional show call. Layout is applied before density
+            labels are positioned and before the show call. Default is True.
         save_filename : str, optional
             Output filename; its extension determines the format. Defaults to
             ``'Kippenhahn.png'``.
@@ -788,6 +868,16 @@ class KippenhahnDiagram:
 
         """
         xaxis_divide = self._xaxis_divisor
+
+        density_levels = np.asarray([] if density_contours is None else density_contours,
+                                    dtype=float)
+        if (density_levels.ndim != 1 or not np.all(np.isfinite(density_levels)) or
+                np.any(density_levels <= 0)):
+            raise ValueError("density_contours must be a sequence of finite, positive densities in g/cm^3")
+        density_levels = np.unique(density_levels)
+        if density_levels.size and self._missing_density_profiles:
+            raise ValueError("Density contours require logRho or rho in profile(s): " +
+                             ", ".join(self._missing_density_profiles))
 
         if axis is None:
             fig, axis = plt.subplots()
@@ -904,6 +994,23 @@ class KippenhahnDiagram:
                           mixing_zones.y_coords, color="w")
         axis.plot(mixing_zones.x_coords[:i], mixing_zones.y_coords[:i], "k-")
 
+        density_plot = None
+        if density_levels.size:
+            log_density = np.ma.masked_invalid(self._log_density)
+            if log_density.count():
+                log_levels = np.log10(density_levels)
+                in_range = (log_levels > log_density.min()) & (log_levels < log_density.max())
+                log_levels = log_levels[in_range]
+                if log_levels.size:
+                    density_plot = axis.contour(
+                        xyz_data.X, xyz_data.Y, log_density,
+                        levels=log_levels, colors="0.25", linewidths=1.5,
+                        linestyles="solid", corner_mask=False)
+                    density_formats = {}
+                    for level, density in zip(log_levels, density_levels[in_range]):
+                        value = format_scientific(density)
+                        density_formats[level] = rf"${value}\,\mathrm{{g/cm^3}}$"
+
         # add core masses
         core_mass_handles = {}
         if self.yaxis == "mass":
@@ -984,10 +1091,24 @@ class KippenhahnDiagram:
         if self.xlims is not None:
             axis.set_xlim(self.xlims)
 
+        if save_file:
+            fig.tight_layout()
+
+        if density_plot is not None:
+            # Measure arc lengths only after limits and the colorbar/layout
+            # have established the visible axes rectangle.
+            fig.canvas.draw()
+            for level, segments in zip(density_plot.levels, density_plot.allsegs):
+                candidates = [_visible_contour_midpoint(segment, axis) for segment in segments]
+                position, length = max(candidates, key=lambda candidate: candidate[1],
+                                       default=(None, 0))
+                if length:
+                    axis.clabel(density_plot, levels=[level], fmt=density_formats, inline=True,
+                                fontsize="small", manual=[position])
+
         if show_plot:
             fig.show()
         if save_file:
-            fig.tight_layout()
             fig.savefig(save_filename)
 
         KippPlot = namedtuple('KippPlot', 'contour_plot histories xlims')
