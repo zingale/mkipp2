@@ -1,9 +1,57 @@
 """Read selected columns from MESA text output and resolve profile paths."""
 
 from collections import OrderedDict
+from contextlib import contextmanager
+from io import TextIOWrapper
+from pathlib import Path, PurePosixPath
+from zipfile import ZipFile
 
 import numpy as np
 from numpy import ma
+
+
+def _archive_logs_root(archive):
+    """Find the unique directory containing MESA index or history files."""
+    roots = {str(PurePosixPath(name).parent) for name in archive.namelist()
+             if PurePosixPath(name).name in {"profiles.index", "history.data"}}
+    if len(roots) != 1:
+        raise ValueError(
+            f"{archive.filename}: expected one LOGS directory in ZIP archive, "
+            f"found {len(roots)}. Specify the directory inside the archive explicitly."
+        )
+    root = roots.pop()
+    return "" if root == "." else root
+
+
+def resolve_logs_dir(log_dir):
+    """Return a directory or a virtual ZIP path to its MESA files."""
+    path = Path(log_dir)
+    if path.suffix.lower() == ".zip" and path.is_file():
+        with ZipFile(path) as archive:
+            root = _archive_logs_root(archive)
+        return str(path / root) if root else str(path)
+    return str(path)
+
+
+@contextmanager
+def _open_text(filename):
+    """Stream a local file or ZIP member, closing all handles on exit."""
+    path = Path(filename)
+    for parent in path.parents:
+        if parent.suffix.lower() == ".zip" and parent.is_file():
+            member = path.relative_to(parent).as_posix()
+            with ZipFile(parent) as archive:
+                if "/" not in member and member not in archive.namelist():
+                    member = str(PurePosixPath(_archive_logs_root(archive)) / member)
+                try:
+                    stream = archive.open(member)
+                except KeyError as exc:
+                    raise FileNotFoundError(f"{filename}: ZIP member {member!r} not found") from exc
+                with stream, TextIOWrapper(stream) as text:
+                    yield text
+            return
+    with open(filename) as text:
+        yield text
 
 
 class MesaData:
@@ -12,7 +60,8 @@ class MesaData:
     Parameters
     ----------
     history_file : str or path-like
-        Path to a MESA history or profile text file.
+        Path to a MESA history or profile text file, including virtual paths
+        such as ``run.zip/LOGS/history.data``.
     only_read_header : bool, optional
         Read only the global header, leaving the column mapping empty.
         Takes precedence over ``read_data``. Default is False.
@@ -78,38 +127,36 @@ class MesaData:
         self.columns = {}
         columns = []
 
-        file = open(self.filename)
+        with _open_text(self.filename) as file:
 
-        # first line is not used
-        file.readline()
+            # first line is not used
+            file.readline()
 
-        # following two lines have header data
-        header_names = file.readline().split()
-        header_vals = file.readline().split()
-        i = 0
-        for i, header_name in enumerate(header_names):
-            # need to properly account for these new columns
-            if header_name in ["version_number", "compiler", "build",
-                               "MESA_SDK_version", "date", "math_backend"]:
-                continue
-            self.header[header_name] = float(header_vals[i])
-            self.header_num[header_name] = i
-            i += 1
+            # following two lines have header data
+            header_names = file.readline().split()
+            header_vals = file.readline().split()
+            i = 0
+            for i, header_name in enumerate(header_names):
+                # need to properly account for these new columns
+                if header_name in ["version_number", "compiler", "build",
+                                   "MESA_SDK_version", "date", "math_backend"]:
+                    continue
+                self.header[header_name] = float(header_vals[i])
+                self.header_num[header_name] = i
+                i += 1
 
-        if only_read_header:
-            file.close()
-            return
+            if only_read_header:
+                return
 
-        # next line is empty
-        file.readline()
+            # next line is empty
+            file.readline()
 
-        # following two lines have column data
-        nums = file.readline().split()
-        names = file.readline().split()
-        for i, name in enumerate(names):
-            self.columns[name] = int(nums[i])-1
-            columns.append(name)
-        file.close()
+            # following two lines have column data
+            nums = file.readline().split()
+            names = file.readline().split()
+            for i, name in enumerate(names):
+                self.columns[name] = int(nums[i])-1
+                columns.append(name)
 
         if not read_data:
             return
@@ -166,9 +213,10 @@ class MesaData:
         self.read_columns = column_names
 
         # read data
-        data = np.loadtxt(self.filename, skiprows=6,
-                          usecols=tuple([self.columns[k] for k in column_names]),
-                          unpack=True)
+        with _open_text(self.filename) as file:
+            data = np.loadtxt(file, skiprows=6,
+                              usecols=tuple([self.columns[k] for k in column_names]),
+                              unpack=True)
 
         self.data = {}
         # Be careful in case only one column is required
@@ -245,7 +293,7 @@ def get_profile_paths(logs_dirs=None):
     Parameters
     ----------
     logs_dirs : sequence of str, optional
-        LOGS directories containing ``profiles.index`` files. Defaults to
+        LOGS directories or ZIP archives containing ``profiles.index`` files. Defaults to
         ``['LOGS']``.
 
     Returns
@@ -275,10 +323,11 @@ def get_profile_paths(logs_dirs=None):
 
     profile_paths = []
     for log_dir in logs_dirs:
-        print(log_dir, logs_dirs)
+        log_dir = resolve_logs_dir(log_dir)
         index_path = log_dir+"/profiles.index"
-        model_number, paths = np.loadtxt(index_path, skiprows=1,
-                                         usecols=(0, 2), unpack=True, ndmin=2)
+        with _open_text(index_path) as file:
+            model_number, paths = np.loadtxt(file, skiprows=1,
+                                             usecols=(0, 2), unpack=True, ndmin=2)
         if paths.size == 0:
             raise ValueError(f"Profile index {index_path} contains no profile entries.")
         mask = np.zeros(len(paths))

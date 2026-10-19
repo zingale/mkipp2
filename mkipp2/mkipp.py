@@ -112,7 +112,9 @@ class KippArgs:
     Parameters
     ----------
     logs_dirs : sequence of str, optional
-        MESA LOGS directories used to discover input files. Defaults to
+        MESA LOGS directories or ZIP archives used to discover input files.
+        Archives may contain the files at their root or in one folder.
+        Use ``run.zip/path/to/LOGS`` to select a folder explicitly. Defaults to
         ``['LOGS']``.
     profile_paths : sequence of str, optional
         Ordered profile paths. If None or empty, discover them from
@@ -210,7 +212,7 @@ class KippArgs:
         if logs_dirs is None:
             logs_dirs = ['LOGS']
 
-        self.logs_dirs = logs_dirs
+        self.logs_dirs = [md.resolve_logs_dir(log_dir) for log_dir in logs_dirs]
         self.clean_data = clean_data
 
         if extra_history_cols is None:

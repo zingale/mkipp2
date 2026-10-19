@@ -38,6 +38,27 @@ The Python snippets below also assume `example/` is the working directory,
 since the default input directory is `LOGS/`. For other data locations,
 pass `logs_dirs=["path/to/LOGS"]` to `mkipp2.KippArgs()`.
 
+ZIP archives can be passed in the same way, without extracting them. For
+example, from the repository root:
+
+```python
+args = mkipp2.KippArgs(
+    logs_dirs=["example/LOGS-mesa-26.04.1.zip"],
+    identifier="net_nuclear_energy", log10_on_data=False,
+)
+mkipp2.kipp_plot(args, core_masses=[])
+```
+
+Files may be at the archive root or inside a single LOGS folder (including
+nested folders). If an archive contains multiple runs, select one explicitly
+with `logs_dirs=["runs.zip/path/to/LOGS"]`. Ordinary directories and ZIP paths
+can be mixed in the same list. Headers and selected data columns are streamed
+from the archive; no temporary files are extracted.
+
+The lower-level readers also accept archive member paths, for example
+`MesaData("run.zip/LOGS/history.data")`. `get_profile_paths(["run.zip"])`
+returns member paths usable by `MesaData` and the plotting functions.
+
 The following Python script
 
 ```python
