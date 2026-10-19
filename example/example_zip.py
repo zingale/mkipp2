@@ -27,16 +27,10 @@ def age_plot():
 
 def collapse_plot():
 
-    # only need to read star_age column first
-    history = mkipp2.mesa_data.MesaData("LOGS-mesa-26.04.1.zip/history.data",
-                                        read_data_cols=["star_age"])
-    max_age = max(history.get("star_age"))
-
     k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
-                                 xaxis="star_age",
+                                 xaxis="collapse",
                                  time_units="yr",
                                  identifier="net_nuclear_energy",
-                                 function_on_xaxis=lambda x: np.log10(max_age+1.e-5 - x),
                                  log10_on_data=False)
 
     k.plot(core_masses=["He", "CO", "ONe", "Fe"],
@@ -46,16 +40,10 @@ def collapse_plot():
 
 def density_contours_plot():
 
-    # only need to read star_age column first
-    history = mkipp2.mesa_data.MesaData("LOGS-mesa-26.04.1.zip/history.data",
-                                        read_data_cols=["star_age"])
-    max_age = max(history.get("star_age"))
-
     k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
-                                 xaxis="star_age",
+                                 xaxis="collapse",
                                  time_units="yr",
                                  identifier="net_nuclear_energy",
-                                 function_on_xaxis=lambda x: np.log10(max_age+1.e-5 - x),
                                  log10_on_data=False)
 
     k.plot(core_masses=["He", "CO", "ONe", "Fe"],
@@ -66,16 +54,10 @@ def density_contours_plot():
 
 def si_plot():
 
-    # only need to read star_age column first
-    history = mkipp2.mesa_data.MesaData("LOGS-mesa-26.04.1.zip/history.data",
-                                        read_data_cols=["star_age"])
-    max_age = max(history.get("star_age"))
-
     k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
-                                 xaxis="star_age",
+                                 xaxis="collapse",
                                  time_units="yr",
                                  identifier="si28",
-                                 function_on_xaxis=lambda x: np.log10(max_age+1.e-5 - x),
                                  log10_on_data=True)
 
     k.plot(core_masses=["He", "CO", "ONe", "Fe"],
@@ -87,16 +69,10 @@ def si_plot():
 
 def burning_regions_plot():
 
-    # only need to read star_age column first
-    history = mkipp2.mesa_data.MesaData("LOGS-mesa-26.04.1.zip/history.data",
-                                        read_data_cols=["star_age"])
-    max_age = max(history.get("star_age"))
-
     k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
-                                 xaxis="star_age",
+                                 xaxis="collapse",
                                  time_units="yr",
-                                 load_profiles=False,
-                                 function_on_xaxis=lambda x: np.log10(max_age+1.e-5 - x))
+                                 load_profiles=False)
 
     k.plot_burning_regions(core_masses=["He", "CO", "ONe", "Fe"],
                            size=(8, 6),

@@ -206,13 +206,21 @@ class KippenhahnDiagram:
         The default extractor computes ``log10(abs(data) + 1e-99)``.
         Forced to False for ``'net_nuclear_energy'``, whose input values are
         treated as already transformed, including when using a custom extractor.
-    xaxis : {'model_number', 'star_age'}, optional
+    xaxis : {'model_number', 'star_age', 'collapse'}, optional
         Horizontal coordinate. Defaults to ``'model_number'``.
+        For ``'collapse'``, use ``log10((max_age - age) / divisor +
+        time_offset)`` and display decreasing values from left to right.
+        The final age is the maximum across the input histories. Cannot be
+        combined with ``function_on_xaxis``.
+    time_offset : float, optional
+        Finite, positive offset in the selected time units for the collapse
+        transform, preventing log(0). Defaults to 1e-5.
     xaxis_divide : float, optional
         Nonzero divisor applied before the x-axis transform. Defaults to
-        1.0. Certain ``time_units`` override it when plotting ``star_age``.
+        1.0. Certain ``time_units`` override it for ``star_age`` and ``collapse``.
+        Must be finite and positive for ``collapse``.
     time_units : {'yr', '1000 yr', 'Myr', 'Gyr'}, optional
-        Time-axis label, defaulting to ``'Myr'``. For ``star_age``, the last
+        Time-axis label, defaulting to ``'Myr'``. For ``star_age`` and ``collapse``, the last
         three choices override the divisor with 1000, 1e6, and 1e9,
         respectively. ``'yr'`` retains ``xaxis_divide``.
     function_on_xaxis : callable, optional
@@ -231,11 +239,15 @@ class KippenhahnDiagram:
         defaults to 1e-7.
     xlims : sequence of two floats, optional
         Inclusive limits in transformed x coordinates, used for data
-        selection and displayed axis limits. Neighboring samples are kept
-        for boundary coverage. Defaults to the full range.
+        selection and displayed axis limits, supplied in increasing order.
+        Collapse mode reverses these limits for display. Neighboring samples
+        are kept for boundary coverage. Defaults to the full range.
 
     Attributes
     ----------
+    min_age, max_age : float or None
+        Stellar-age bounds in years across the input histories, respecting
+        ``clean_data``. Computed for ``xaxis='collapse'``; otherwise None.
     xyz_data : namedtuple
         Interpolated profile data with fields ``xlims``, ``X``, ``Y``, and
         ``Z``, prepared during construction. Arrays have shape
@@ -284,9 +296,10 @@ class KippenhahnDiagram:
                  extractor=None,
                  log10_on_data=True,
                  xaxis="model_number",
+                 time_offset=1.e-5,
                  xaxis_divide=1.0,
                  time_units="Myr",
-                 function_on_xaxis=lambda x: x,
+                 function_on_xaxis=None,
                  yaxis="mass",
                  yresolution=1000,
                  mass_tolerance=0.0000001,
@@ -317,9 +330,24 @@ class KippenhahnDiagram:
             self._log10_on_data = False
 
         self._xaxis = xaxis
+        self._time_offset = time_offset
+        if xaxis == "collapse":
+            if function_on_xaxis is not None:
+                raise ValueError("Error, function_on_xaxis cannot be specified with xaxis='collapse'")
+            if not np.isfinite(time_offset) or time_offset <= 0:
+                raise ValueError("time_offset must be finite and positive for xaxis='collapse'")
+
         self._xaxis_divide = xaxis_divide
         self._time_units = time_units
-        self._function_on_xaxis = function_on_xaxis
+        if xaxis == "collapse" and (not np.isfinite(self._xaxis_divisor) or
+                                    self._xaxis_divisor <= 0):
+            raise ValueError("The time divisor must be finite and positive for xaxis='collapse'")
+
+        if function_on_xaxis is None:
+            self._function_on_xaxis = lambda x: x
+        else:
+            self._function_on_xaxis = function_on_xaxis
+
         self._yaxis = yaxis
 
         self._yresolution = yresolution
@@ -336,8 +364,48 @@ class KippenhahnDiagram:
         if not self.history_paths:
             self._history_paths = tuple(log_dir + "/history.data" for log_dir in self.logs_dirs)
 
+        self._min_age = None
+        self._max_age = None
+        if xaxis == "collapse":
+            histories = [md.MesaData(history_path, read_data_cols=["star_age"],
+                                     clean_data=self.clean_data)
+                         for history_path in self.history_paths]
+            self._max_age = max(np.max(history.get("star_age")) for history in histories)
+            self._min_age = min(np.min(history.get("star_age")) for history in histories)
+
+            if not np.isfinite(self.min_age) or not np.isfinite(self.max_age):
+                raise ValueError("Collapse mode requires finite history ages")
+            self._function_on_xaxis = self._collapse_transform
+
         self.xyz_data = self._build_xyz_data() if self.load_profiles else None
         self.mixing_zones = self._build_mixing_zones()
+
+    @property
+    def min_age(self):
+        """Return the minimum history age in years for collapse mode."""
+        return self._min_age
+
+    @property
+    def max_age(self):
+        """Return the maximum history age in years for collapse mode."""
+        return self._max_age
+
+    @property
+    def time_offset(self):
+        """Return the fixed collapse offset in the selected time units."""
+        return self._time_offset
+
+    def _collapse_transform(self, age):
+        """Transform ages already divided into the selected time units."""
+        remaining = self.max_age / self._xaxis_divisor - np.asarray(age) + self.time_offset
+        if np.any(~np.isfinite(remaining)) or np.any(remaining <= 0):
+            raise ValueError("Collapse coordinates require finite, positive time remaining plus time_offset")
+        return np.log10(remaining)
+
+    @property
+    def _xaxis_column(self):
+        """Return the MESA column underlying the selected horizontal axis."""
+        return "star_age" if self.xaxis == "collapse" else self.xaxis
 
     @property
     def load_profiles(self):
@@ -436,7 +504,7 @@ class KippenhahnDiagram:
         For stellar age, ``1000 yr``, ``Myr``, and ``Gyr`` override the
         configured divisor. Otherwise, retain ``xaxis_divide``.
         """
-        if self.xaxis == "star_age":
+        if self.xaxis in ("star_age", "collapse"):
             return {"1000 yr": 1000, "Myr": 1e6, "Gyr": 1e9}.get(
                 self.time_units, self.xaxis_divide)
         return self.xaxis_divide
@@ -480,7 +548,7 @@ class KippenhahnDiagram:
         else:
             type_prefix, top_prefix = "mix_type_", "mix_qtop_"
 
-        required = {"model_number", "star_age", "star_mass", "log_R", self.xaxis}
+        required = {"model_number", "star_age", "star_mass", "log_R", self._xaxis_column}
         required.update(self.extra_history_cols)
 
         print("Reading history data")
@@ -514,7 +582,7 @@ class KippenhahnDiagram:
             histories.append(history)
         x_coords = []
         for history in histories:
-            x_coords.extend(history.get(self.xaxis) / xaxis_divide)
+            x_coords.extend(history.get(self._xaxis_column) / xaxis_divide)
         x_coords = self.function_on_xaxis(np.array(x_coords))
         y_coords = []
         if self.yaxis == "radius":
@@ -737,7 +805,7 @@ class KippenhahnDiagram:
                 # if given xlims, filter out profiles out of range add one
                 # profile to each side so data is shown at borders
                 if self.xlims is not None:
-                    x_coord = self.function_on_xaxis(prof.header[self.xaxis] / xaxis_divide)
+                    x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
                     if self.xlims[0] <= x_coord <= self.xlims[1]:
                         prof_include[i] = True
                         if i > 0:
@@ -794,8 +862,10 @@ class KippenhahnDiagram:
                 prof.read_data(columns + ([density_column] if density_column else []))
             except Exception as e:
                 raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
-            x_coord = self.function_on_xaxis(prof.header[self.xaxis] / xaxis_divide)
-            if x_coord < max_x_coord:
+            x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
+            if self.xaxis == "collapse" and x_coord > min_x_coord:
+                print("Profiles are not decreasing in X coordinate!!!")
+            elif self.xaxis != "collapse" and x_coord < max_x_coord:
                 print("Profiles are not increasing in X coordinate!!!")
             max_x_coord = max(max_x_coord, x_coord)
             min_x_coord = min(min_x_coord, x_coord)
@@ -1138,25 +1208,25 @@ class KippenhahnDiagram:
                 hatch = "//"
                 line = 1
             # Overshooting
-            elif mixing_zones.mix_types[i] == 3 and show_over:
+            elif mixing_zones.mix_types[i] == 2 and show_over:
                 label = "Overshooting"
                 color = "purple"
                 hatch = "x"
                 line = 1
             # Semiconvective mixing
-            elif mixing_zones.mix_types[i] == 4 and show_semi:
+            elif mixing_zones.mix_types[i] == 3 and show_semi:
                 label = "Semiconvection"
                 color = "red"
                 hatch = "\\\\"
                 line = 1
             # Thermohaline mixing
-            elif mixing_zones.mix_types[i] == 5 and show_therm:
+            elif mixing_zones.mix_types[i] == 4 and show_therm:
                 label = "Thermohaline"
                 color = "Gold"  # Salmon
                 hatch = "||"
                 line = 1
             # Rotational mixing
-            elif mixing_zones.mix_types[i] == 6 and show_rot:
+            elif mixing_zones.mix_types[i] == 5 and show_rot:
                 label = "Rotational"
                 color = "brown"
                 hatch = "*"
@@ -1182,7 +1252,7 @@ class KippenhahnDiagram:
         # contour plot
         axis.fill_between(mixing_zones.x_coords, max(mixing_zones.y_coords),
                           mixing_zones.y_coords, color="w")
-        surface_end = len(mixing_zones.x_coords) if burning_regions else i
+        surface_end = len(mixing_zones.x_coords) if burning_regions or self.xaxis == "collapse" else i
         axis.plot(mixing_zones.x_coords[:surface_end], mixing_zones.y_coords[:surface_end], "k-")
 
         density_plot = None
@@ -1227,7 +1297,7 @@ class KippenhahnDiagram:
                     color = "C3:"
                 for history in mixing_zones.histories:
                     core_line, = axis.plot(
-                        self.function_on_xaxis(history.get(self.xaxis) / xaxis_divide),
+                        self.function_on_xaxis(history.get(self._xaxis_column) / xaxis_divide),
                         history.get(field_name), color, lw=2, label=f"{core_mass} core")
                     core_mass_handles.setdefault(core_mass, core_line)
 
@@ -1273,7 +1343,9 @@ class KippenhahnDiagram:
             cbar.set_label(label)
 
             # add axis labels
-            if self.xaxis == "star_age":
+            if self.xaxis == "collapse":
+                axis.set_xlabel(r'$\log10(t_f - t)$ [' + self.time_units + ']')
+            elif self.xaxis == "star_age":
                 axis.set_xlabel(r'$t$ ('+self.time_units+')')
             else:
                 axis.set_xlabel(r'$Model Number$')
@@ -1286,6 +1358,8 @@ class KippenhahnDiagram:
             axis.margins(x=0, y=0)
         if self.xlims is not None:
             axis.set_xlim(self.xlims)
+        if self.xaxis == "collapse":
+            axis.set_xlim((self.xlims or plot_xlims)[::-1])
 
         if save_file:
             fig.tight_layout()
