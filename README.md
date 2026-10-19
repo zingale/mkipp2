@@ -98,6 +98,22 @@ Several options can be passed to `mkipp2.KippenhahnDiagram()` --- see the docstr
 for details. These settings are fixed after construction; create a new
 diagram to change them. Rendering options can vary with each call to `plot()`.
 
+To overlay density contours on a mass-versus-age diagram, pass densities
+in g/cm³ to `plot()`:
+
+```python
+k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS"], xaxis="star_age", yaxis="mass")
+k.plot(density_contours=[1.e2, 1.e4, 1.e6])
+```
+
+These are gray lines labeled with the density in g/cm³ (not its logarithm).
+Every selected profile must contain `logRho` or `rho`; `logRho` takes
+precedence if both are present. Density is interpolated logarithmically on
+the same grid as the filled contours and cached during construction.
+Levels outside the density range are omitted. Use `None` (the default) or
+an empty list to omit density contours. The overlay also supports a radius
+axis and the configured time units and x-axis transform.
+
 Also a matplotlib `Axes` object can be passed to `plot()`. This allows
 plot decorations to be made independently, or can be also used to make
 a plot with many different Kippenhahn plots. As an example, the
