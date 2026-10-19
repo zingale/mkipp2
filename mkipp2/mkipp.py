@@ -11,7 +11,10 @@ import re
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import PatchCollection
+from matplotlib.colors import BoundaryNorm
 from matplotlib.patches import Patch, PathPatch
+from matplotlib.ticker import MaxNLocator
 
 import mkipp2.kipp_data as kipp
 import mkipp2.mesa_data as md
@@ -180,6 +183,10 @@ class KippenhahnDiagram:
         History paths in concatenation order. If None or empty, use
         ``history.data`` in each LOGS directory. All history files must have
         the same data column names; column order may differ.
+    load_profiles : bool, optional
+        Load profile data during construction. Default is True. Set False
+        for history-only ``plot_burning_regions()``; ``xyz_data`` is then None
+        and neither profile files nor ``profiles.index`` are read.
     clean_data : bool, optional
         Remove history rows superseded by backups or restarts. Default is
         True.
@@ -244,7 +251,8 @@ class KippenhahnDiagram:
     All parameters are keyword-only and exposed as read-only properties,
     with defaults resolved as described above. Sequence settings are copied
     into tuples. Construction immediately reads the input files and computes
-    both data products. Create a new diagram to change input settings;
+    both data products, except profiles when ``load_profiles=False``.
+    Create a new diagram to change input settings;
     rendering options can be changed on each call to ``plot()``.
     The prepared arrays and history objects are not made immutable. Custom
     callables are retained by reference and should keep the same behavior
@@ -270,6 +278,7 @@ class KippenhahnDiagram:
                  profile_paths=None,
                  history_paths=None,
                  clean_data=True,
+                 load_profiles=True,
                  extra_history_cols=None,
                  identifier="eps_nuc",
                  extractor=None,
@@ -290,6 +299,7 @@ class KippenhahnDiagram:
 
         self._logs_dirs = tuple(md.resolve_logs_dir(log_dir) for log_dir in logs_dirs)
         self._clean_data = clean_data
+        self._load_profiles = load_profiles
 
         if extra_history_cols is None:
             extra_history_cols = []
@@ -319,15 +329,20 @@ class KippenhahnDiagram:
 
         # Discover unspecified paths and store immutable copies of sequences.
         self._profile_paths = tuple(profile_paths) if profile_paths is not None else ()
-        if not self.profile_paths:
+        if self.load_profiles and not self.profile_paths:
             self._profile_paths = tuple(md.get_profile_paths(logs_dirs=self.logs_dirs))
 
         self._history_paths = tuple(history_paths) if history_paths is not None else ()
         if not self.history_paths:
             self._history_paths = tuple(log_dir + "/history.data" for log_dir in self.logs_dirs)
 
-        self.xyz_data = self._build_xyz_data()
+        self.xyz_data = self._build_xyz_data() if self.load_profiles else None
         self.mixing_zones = self._build_mixing_zones()
+
+    @property
+    def load_profiles(self):
+        """Return whether profile data are loaded during construction."""
+        return self._load_profiles
 
     @property
     def logs_dirs(self):
@@ -491,6 +506,7 @@ class KippenhahnDiagram:
                 key for key in history.columns
                 if key in required or
                 key.endswith("core_mass") or
+                re.fullmatch(r"burn_(?:type_|qtop_|relr_type_|relr_top_)\d+", key) or
                 re.fullmatch(re.escape(type_prefix) + r"\d+", key) or
                 re.fullmatch(re.escape(top_prefix) + r"\d+", key)
             ]
@@ -530,29 +546,92 @@ class KippenhahnDiagram:
         else:
             tolerance = self.mass_tolerance
 
+        zones, mix_types = self._build_region_paths(
+            mix_data, x_coords, y_coords, skip_types=(0, -1), tolerance=tolerance)
+
+        MixingZones = namedtuple('MixingZones', 'zones mix_types x_coords y_coords histories')
+        return MixingZones(zones, mix_types, x_coords, y_coords, histories)
+
+    def _build_buring_zones(self):
+        """Construct burning-region paths from the loaded history data.
+
+        Returns
+        -------
+        BurningZones
+            Named tuple with ``zones`` (stitched Matplotlib paths),
+            ``burn_types`` (signed logarithmic heating/cooling levels),
+            ``x_coords``, ``y_coords`` (stellar surface), and ``histories``.
+
+        Raises
+        ------
+        ValueError
+            If histories are absent or burning-region columns are missing,
+            unpaired, or not consecutively numbered from one.
+
+        Notes
+        -----
+        Reuse the histories and coordinates prepared by ``_build_mixing_zones``.
+        Build a new data product without rereading files or creating artists.
+        Zero and unused (-9999) values are skipped; negative values remain as
+        cooling regions. Adjacent equal-valued blocks use the shared stitching
+        algorithm, without a minimum layer thickness.
+        """
+        prefix = "burn_relr_" if self.yaxis == "radius" else "burn_"
+        top_prefix = prefix + ("top_" if self.yaxis == "radius" else "qtop_")
+        type_prefix = prefix + "type_"
+        histories = self.mixing_zones.histories
+        if not histories:
+            raise ValueError("No histories available for burning regions")
+        indices = sorted(int(key[len(type_prefix):]) for key in histories[0].columns
+                         if re.fullmatch(re.escape(type_prefix) + r"\d+", key))
+        top_indices = sorted(int(key[len(top_prefix):]) for key in histories[0].columns
+                             if re.fullmatch(re.escape(top_prefix) + r"\d+", key))
+        if not indices or indices != top_indices or indices != list(range(1, max(indices) + 1)):
+            raise ValueError(f"Burning regions require consecutive paired {type_prefix}N and {top_prefix}N "
+                             f"columns in {histories[0].filename}")
+        x = np.asarray(self.mixing_zones.x_coords)
+        surface = np.asarray(self.mixing_zones.y_coords)
+        region_data = []
+        for region in indices:
+            types = np.concatenate([history.get(f"{type_prefix}{region}") for history in histories])
+            tops = np.concatenate([history.get(f"{top_prefix}{region}") for history in histories])
+            region_data.append((types, tops))
+        paths, values = self._build_region_paths(
+            region_data, x, surface, skip_types=(0, -9999), tolerance=0)
+        BurningZones = namedtuple('BurningZones', 'zones burn_types x_coords y_coords histories')
+        return BurningZones(paths, values, x, surface, histories)
+
+    def _build_region_paths(self, region_data, x_coords, y_coords, *, skip_types, tolerance):
+        """Stitch adjacent equal-valued history layers into connected paths.
+
+        Each entry in region_data contains a type/value array and a fractional
+        upper-bound array. Zone tracks splits and merges, preserving holes in
+        the resulting compound paths. Skipped values still define the lower
+        boundary of the next layer. Intervals outside xlims close open zones.
+        """
         zones = []
-        mix_types = []
+        region_types = []
         open_zones = []
         new_zones = []
         for i in range(1, len(x_coords)):
             current_x = x_coords[i]
-            # ignore points outside of range, but include one outside each
-            # boundary do not assume x_coords is in increasing order
-            if self.xlims is not None:
-                if not self.xlims[0] <= current_x <= self.xlims[1]:
-                    if not ((i+1 < len(x_coords) and
-                             self.xlims[0] <= x_coords[i+1] <= self.xlims[1]) or
-                            (i-1 > 0 and self.xlims[0] <= x_coords[i-1] <= self.xlims[1])):
-                        continue
             previous_x = x_coords[i-1]
-            for j in range(0, mesa_mix_zones):
-                mix_type = mix_data[j][0][i]
-                if mix_type in (0, -1):
+            include = (self.xlims is None or
+                       (max(previous_x, current_x) >= self.xlims[0] and
+                        min(previous_x, current_x) <= self.xlims[1]))
+            # Empty intervals still close open zones, preventing joins across gaps.
+            for j in (range(len(region_data)) if include else ()):
+                region_type = region_data[j][0][i]
+                if region_type in skip_types:
                     continue
-                max_y_coord = mix_data[j][1][i] * y_coords[i]
+                max_y_coord = region_data[j][1][i] * y_coords[i]
                 min_y_coord = 0
                 if j > 0:
-                    min_y_coord = mix_data[j-1][1][i] * y_coords[i]
+                    min_y_coord = region_data[j-1][1][i] * y_coords[i]
+                max_y_coord = min(max_y_coord, y_coords[i])
+                if (not np.all(np.isfinite([previous_x, current_x, min_y_coord, max_y_coord, region_type])) or
+                        min_y_coord < 0 or max_y_coord <= min_y_coord):
+                    continue
                 # ignore too small regions
                 if max_y_coord - min_y_coord < tolerance*y_coords[i]:
                     continue
@@ -561,7 +640,7 @@ class KippenhahnDiagram:
                 zones_to_merge = []
                 for z in open_zones:
                     if z.extend(zone_block.vertices[1], zone_block.vertices[1].prev_vertex,
-                                mix_type):
+                                region_type):
                         exists = True
                         z.new_blocks.append(zone_block)
                         zones_to_merge.append(z)
@@ -571,7 +650,7 @@ class KippenhahnDiagram:
                     open_zones.remove(zones_to_merge[k])
                 # create zone if it has no predecessor
                 if not exists:
-                    z = kipp.Zone(zone_block, mix_type)
+                    z = kipp.Zone(zone_block, region_type)
                     new_zones.append(z)
             open_zones.extend(new_zones)
             new_zones = []
@@ -582,7 +661,7 @@ class KippenhahnDiagram:
             for z in list(open_zones):
                 if len(z.last_blocks) == 0:
                     zones.append(z.get_path())
-                    mix_types.append(z.mix_type)
+                    region_types.append(z.mix_type)
                     open_zones.remove(z)
             # order zones
             temp_open_zones = []
@@ -600,10 +679,9 @@ class KippenhahnDiagram:
         for z in open_zones:
             z.switch_new_blocks()
             zones.append(z.get_path())
-            mix_types.append(z.mix_type)
+            region_types.append(z.mix_type)
 
-        MixingZones = namedtuple('MixingZones', 'zones mix_types x_coords y_coords histories')
-        return MixingZones(zones, mix_types, x_coords, y_coords, histories)
+        return zones, region_types
 
     def _build_xyz_data(self):
         """Interpolate a profile quantity onto a common vertical contour grid.
@@ -867,6 +945,99 @@ class KippenhahnDiagram:
         those axes, or the newly created figure when ``axis`` is None.
 
         """
+        return self._plot(
+            axis=axis,
+            contour_colormap=contour_colormap,
+            core_masses=core_masses,
+            density_contours=density_contours,
+            decorate_plot=decorate_plot,
+            levels=levels,
+            level_style=level_style,
+            num_levels=num_levels,
+            show_mixing_legend=show_mixing_legend,
+            show_core_mass_legend=show_core_mass_legend,
+            show_plot=show_plot,
+            show_conv=show_conv,
+            show_therm=show_therm,
+            show_semi=show_semi,
+            show_over=show_over,
+            show_rot=show_rot,
+            save_file=save_file,
+            save_filename=save_filename,
+        )
+
+    def _plot_history_burning(self, axis, colormap, levels):
+        """Render the paths and values prepared by the burning-zone builder."""
+        burning_zones = self._build_buring_zones()
+        values = burning_zones.burn_types
+        if levels is None or len(levels) == 0:
+            limit = max(1, int(np.ceil(np.max(np.abs(values))))) if values else 1
+            levels = np.arange(-limit - 0.5, limit + 1.5)
+        levels = np.asarray(levels, dtype=float)
+        if (levels.ndim != 1 or len(levels) < 2 or not np.all(np.isfinite(levels)) or
+                np.any(np.diff(levels) <= 0)):
+            raise ValueError("levels must contain at least two finite, increasing bin boundaries")
+        colormap = plt.get_cmap(colormap)
+        norm = BoundaryNorm(levels, colormap.N, clip=True)
+        collection = PatchCollection([PathPatch(path) for path in burning_zones.zones],
+                                     array=np.asarray(values), cmap=colormap,
+                                     norm=norm, edgecolors="none", antialiaseds=False)
+        axis.add_collection(collection)
+        axis.autoscale_view()
+        return collection
+
+    def plot_burning_regions(self, **kwargs):
+        """Plot history burning regions with mixing and stellar structure overlays.
+
+        Parameters
+        ----------
+        **kwargs
+            Rendering options accepted by :meth:`plot`. ``levels`` gives bin
+            boundaries for the signed logarithmic ``burn_type`` values; the
+            default is symmetric integer bins. ``level_style`` and
+            ``num_levels`` apply only to profile plots. The default colormap
+            is ``RdBu_r``. Density contours still require loaded profiles.
+
+        Returns
+        -------
+        KippPlot
+            Fields ``contour_plot`` (a colored PatchCollection), ``histories``,
+            and ``xlims`` (the full history extent).
+
+        Notes
+        -----
+        Uses ``burn_type_N`` and ``burn_qtop_N`` for mass, or
+        ``burn_relr_type_N`` and ``burn_relr_top_N`` for radius. Each region
+        spans the previous history coordinate to the current one, with bounds
+        from the current sample. Zero and unused (-9999) regions are omitted;
+        negative values represent cooling. Adjacent blocks with the same value
+        are stitched using the mixing-region algorithm, including splits and
+        merges. No vertical rebinning is performed.
+        Construct with ``load_profiles=False`` to use history files alone.
+        """
+        return self._plot(burning_regions=True, **kwargs)
+
+    def _plot(self, *,
+             burning_regions=False,
+             axis=None,
+             contour_colormap=None,
+             core_masses=None,
+             density_contours=None,
+             decorate_plot=True,
+             levels=None,
+             level_style=None,
+             num_levels=8,
+             show_mixing_legend=True,
+             show_core_mass_legend=True,
+             show_plot=False,
+             show_conv=True,
+             show_therm=True,
+             show_semi=True,
+             show_over=True,
+             show_rot=False,
+             save_file=True,
+             save_filename="Kippenhahn.png"):
+        """Render either data source with the shared overlays and decorations."""
         xaxis_divide = self._xaxis_divisor
 
         density_levels = np.asarray([] if density_contours is None else density_contours,
@@ -875,6 +1046,8 @@ class KippenhahnDiagram:
                 np.any(density_levels <= 0)):
             raise ValueError("density_contours must be a sequence of finite, positive densities in g/cm^3")
         density_levels = np.unique(density_levels)
+        if density_levels.size and not self.load_profiles:
+            raise ValueError("Density contours require load_profiles=True")
         if density_levels.size and self._missing_density_profiles:
             raise ValueError("Density contours require logRho or rho in profile(s): " +
                              ", ".join(self._missing_density_profiles))
@@ -885,6 +1058,15 @@ class KippenhahnDiagram:
             fig = axis.figure
 
         xyz_data = self.xyz_data
+        if burning_regions:
+            x = self.mixing_zones.x_coords
+            if len(x) < 2:
+                raise ValueError("At least two history samples are required for burning regions")
+            plot_xlims = (float(np.min(x)), float(np.max(x)))
+        elif xyz_data is None:
+            raise ValueError("plot() requires load_profiles=True")
+        else:
+            plot_xlims = xyz_data.xlims
 
         if levels is None:
             levels = []
@@ -898,13 +1080,15 @@ class KippenhahnDiagram:
             core_masses = ["He", "C", "O"]
 
         if contour_colormap is None:
-            if self.identifier == "net_nuclear_energy":
+            if burning_regions or self.identifier == "net_nuclear_energy":
                 contour_colormap = plt.get_cmap("RdBu_r")
             else:
                 contour_colormap = plt.get_cmap("Blues")
 
         # only plot if there is data
-        if xyz_data.Z.size > 0:
+        if burning_regions:
+            contour_plot = self._plot_history_burning(axis, contour_colormap, levels)
+        elif xyz_data.Z.size > 0:
             # Get levels if undefined
             if len(levels) == 0:
                 if level_style == "log":
@@ -975,7 +1159,7 @@ class KippenhahnDiagram:
             else:
                 label = "_nolegend_"
                 color = "white"
-                hatch = " "
+                hatch = ""
                 line = 0
             patch = PathPatch(zone, fill=False, hatch=hatch,
                               edgecolor=color, linewidth=line, label=label)
@@ -985,14 +1169,15 @@ class KippenhahnDiagram:
 
         # limit x_coords to data of contours and add line at stellar surface
         for i, x_coord in enumerate(mixing_zones.x_coords):
-            if x_coord > xyz_data.xlims[1]:
+            if x_coord > plot_xlims[1]:
                 break
 
         # Also fill with white above the plot to cover any remainder of the
         # contour plot
         axis.fill_between(mixing_zones.x_coords, max(mixing_zones.y_coords),
                           mixing_zones.y_coords, color="w")
-        axis.plot(mixing_zones.x_coords[:i], mixing_zones.y_coords[:i], "k-")
+        surface_end = len(mixing_zones.x_coords) if burning_regions else i
+        axis.plot(mixing_zones.x_coords[:surface_end], mixing_zones.y_coords[:surface_end], "k-")
 
         density_plot = None
         if density_levels.size:
@@ -1003,7 +1188,7 @@ class KippenhahnDiagram:
                 log_levels = log_levels[in_range]
                 if log_levels.size:
                     density_plot = axis.contour(
-                        xyz_data.X, xyz_data.Y, log_density,
+                        self.xyz_data.X, self.xyz_data.Y, log_density,
                         levels=log_levels, colors="0.25", linewidths=1.5,
                         linestyles="solid", corner_mask=False)
                     density_formats = {}
@@ -1062,11 +1247,14 @@ class KippenhahnDiagram:
         if decorate_plot:
 
             # add colorbar
-            cbar = plt.colorbar(contour_plot, pad=0.05)
+            cbar = fig.colorbar(contour_plot, ax=axis, pad=0.05)
+            if burning_regions:
+                cbar.locator = MaxNLocator(nbins=9, integer=True)
+                cbar.update_ticks()
 
             # use pretty labels if we know the field
             label = self.identifier
-            if self.identifier == "net_nuclear_energy":
+            if burning_regions or self.identifier == "net_nuclear_energy":
                 label = (r"$\mathrm{sgn}(\epsilon_{\rm net})\,"
                          r"\log_{10}\max(1, |\epsilon_{\rm net}|)$"
                          "\n" + r"$\epsilon_{\rm net}$ in erg g$^{-1}$ s$^{-1}$")
@@ -1088,6 +1276,8 @@ class KippenhahnDiagram:
             else:
                 axis.set_ylabel(r'$m/M_\odot$')
 
+        if burning_regions:
+            axis.margins(x=0, y=0)
         if self.xlims is not None:
             axis.set_xlim(self.xlims)
 
@@ -1113,4 +1303,4 @@ class KippenhahnDiagram:
 
         KippPlot = namedtuple('KippPlot', 'contour_plot histories xlims')
 
-        return KippPlot(contour_plot, mixing_zones.histories, xyz_data.xlims)
+        return KippPlot(contour_plot, mixing_zones.histories, plot_xlims)

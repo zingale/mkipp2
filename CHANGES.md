@@ -11,6 +11,9 @@ LOGS inputs can now be ZIP archives, read directly without extraction.
 Density contours can be overlaid as labeled gray lines using
 `plot(density_contours=[...])`, with densities supplied in g/cm³.
 
+History burning regions can now be plotted with `plot_burning_regions()`,
+including mixing overlays. Use `load_profiles=False` for history-only input.
+
 ## History
 
 Based on `SimpleMesaKippy.py` and `Kippy.py`.

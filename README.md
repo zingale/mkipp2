@@ -114,6 +114,33 @@ Levels outside the density range are omitted. Use `None` (the default) or
 an empty list to omit density contours. The overlay also supports a radius
 axis and the configured time units and x-axis transform.
 
+To plot the history's burning regions instead of an interpolated profile
+quantity, use `plot_burning_regions()`:
+
+```python
+k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
+                             xaxis="star_age", load_profiles=False)
+k.plot_burning_regions(core_masses=["He", "CO", "ONe", "Fe"],
+                       save_filename="Kippenhahn_burning.png")
+```
+
+This requires `burning_regions N` in MESA's `history_columns.list`, producing
+paired `burn_type_N` and `burn_qtop_N` columns. For `yaxis="radius"`, use
+`burn_relr_regions N`, which produces `burn_relr_type_N` and `burn_relr_top_N`.
+The signed logarithmic net heating/cooling levels are drawn as filled regions
+at their history boundaries, with mixing regions overlaid. Zero and unused
+regions are left unfilled. Positive values indicate net heating; negative
+values indicate net cooling.
+
+`load_profiles=False` skips profile files and `profiles.index` entirely.
+With the default `load_profiles=True`, the same diagram can use either plot
+method, and `plot_burning_regions(density_contours=[1.e2, 1.e4])` can overlay
+profile-derived density contours. The two methods share rendering options;
+for burning regions, `levels` specifies color-bin boundaries in the signed
+logarithmic values, while `level_style` and `num_levels` are unused. The default
+color bins are centered on integer values, using `RdBu_r`. The returned
+`contour_plot` is a Matplotlib `PatchCollection` of stitched paths for burning-region plots.
+
 Also a matplotlib `Axes` object can be passed to `plot()`. This allows
 plot decorations to be made independently, or can be also used to make
 a plot with many different Kippenhahn plots. As an example, the
