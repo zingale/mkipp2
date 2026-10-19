@@ -1,4 +1,4 @@
-"""Read MESA output and construct contour grids and mixing-region boundaries."""
+"""Construct linked mixing-region boundaries for Kippenhahn diagrams."""
 
 import re
 from collections import namedtuple

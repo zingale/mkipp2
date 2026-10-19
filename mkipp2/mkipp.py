@@ -1,8 +1,10 @@
 """Create Kippenhahn diagrams from MESA history and profile output.
 
-Requirements: history.data and profiles.data containing
-              History (star_age,model_number,star_mass,photosphere_r,mixing_regions,mix_relr_regions)
-              Profile (mass,radius,eps_nuc)
+``KippenhahnDiagram`` reads history and profile files at construction and
+reuses the prepared data for subsequent calls to ``plot()``. By default,
+input paths are discovered from ``history.data`` and ``profiles.index`` in
+the LOGS directory. Profile columns depend on the chosen y axis and extractor;
+history columns include stellar coordinates, mixing regions, and core masses.
 """
 from collections import namedtuple
 import re
@@ -25,7 +27,7 @@ def default_extractor(identifier, log10_on_data, prof,
         Profile column name.
     log10_on_data : bool
         If True, return ``log10(abs(data) + 1e-99)``.
-    prof : mesa_data.mesa_data or None
+    prof : mkipp2.mesa_data.MesaData or None
         Loaded profile. May be None when requesting column names.
     return_data_columns : bool, optional
         Return required column names instead of data. Default is False.
@@ -112,15 +114,15 @@ class KippenhahnDiagram:
 
     Parameters
     ----------
-    logs_dirs : sequence of str, optional
+    logs_dirs : sequence of str or path-like, optional
         MESA LOGS directories or ZIP archives used to discover input files.
         Archives may contain the files at their root or in one folder.
         Use ``run.zip/path/to/LOGS`` to select a folder explicitly. Defaults to
         ``['LOGS']``.
-    profile_paths : sequence of str, optional
+    profile_paths : sequence of str or path-like, optional
         Ordered profile paths. If None or empty, discover them from
         ``profiles.index`` in each LOGS directory.
-    history_paths : sequence of str, optional
+    history_paths : sequence of str or path-like, optional
         History paths in concatenation order. If None or empty, use
         ``history.data`` in each LOGS directory. All history files must have
         the same data column names; column order may differ.
@@ -141,8 +143,8 @@ class KippenhahnDiagram:
     log10_on_data : bool, optional
         Request logarithmic values from the extractor. Default is True.
         The default extractor computes ``log10(abs(data) + 1e-99)``.
-        Note: for special fields like "net_nuclear_energy", this is disabled
-        since the log is already taken.
+        Forced to False for ``'net_nuclear_energy'``, whose input values are
+        treated as already transformed, including when using a custom extractor.
     xaxis : {'model_number', 'star_age'}, optional
         Horizontal coordinate. Defaults to ``'model_number'``.
     xaxis_divide : float, optional
@@ -166,7 +168,7 @@ class KippenhahnDiagram:
         Minimum mixing-layer thickness as a fraction of the surface
         coordinate, using the tolerance for the selected y axis. Each
         defaults to 1e-7.
-    xlims : tuple of float, optional
+    xlims : sequence of two floats, optional
         Inclusive limits in transformed x coordinates, used for data
         selection and displayed axis limits. Neighboring samples are kept
         for boundary coverage. Defaults to the full range.
@@ -175,7 +177,9 @@ class KippenhahnDiagram:
     ----------
     xyz_data : namedtuple
         Interpolated profile data with fields ``xlims``, ``X``, ``Y``, and
-        ``Z``, prepared during construction.
+        ``Z``, prepared during construction. Arrays have shape
+        ``(yresolution, number_of_selected_profiles)``; ``xlims`` gives the
+        extent of selected profile coordinates, including boundary neighbors.
     mixing_zones : namedtuple
         Mixing-region paths and history data with fields ``zones``,
         ``mix_types``, ``x_coords``, ``y_coords``, and ``histories``, prepared
@@ -188,6 +192,22 @@ class KippenhahnDiagram:
     into tuples. Construction immediately reads the input files and computes
     both data products. Create a new diagram to change input settings;
     rendering options can be changed on each call to ``plot()``.
+    The prepared arrays and history objects are not made immutable. Custom
+    callables are retained by reference and should keep the same behavior
+    throughout the diagram's lifetime.
+
+    Examples
+    --------
+    Load data once and draw a diagram without saving a file:
+
+    .. code-block:: python
+
+        diagram = KippenhahnDiagram(logs_dirs=["LOGS"], xaxis="star_age")
+        result = diagram.plot(save_file=False)
+
+    Access the prepared data through ``diagram.xyz_data`` and
+    ``diagram.mixing_zones``. Call ``diagram.plot(axis=another_axis)`` to
+    draw the same data on another set of axes.
 
     """
 
@@ -342,7 +362,11 @@ class KippenhahnDiagram:
 
     @property
     def _xaxis_divisor(self):
-        """Return the coordinate divisor, applying stellar-age unit overrides."""
+        """Return the divisor shared by profile, mixing, and core coordinates.
+
+        For stellar age, ``1000 yr``, ``Myr``, and ``Gyr`` override the
+        configured divisor. Otherwise, retain ``xaxis_divide``.
+        """
         if self.xaxis == "star_age":
             return {"1000 yr": 1000, "Myr": 1e6, "Gyr": 1e9}.get(
                 self.time_units, self.xaxis_divide)
@@ -367,13 +391,17 @@ class KippenhahnDiagram:
 
         Notes
         -----
+        Read histories using the fixed instance settings and return a new
+        data product. The constructor stores it as ``mixing_zones``.
+
         Each layer at sample i becomes a rectangle spanning samples i-1 to i.
         Mass layers use ``mix_type_*`` and ``mix_qtop_*``; radius layers use
         ``mix_relr_type_*`` and ``mix_relr_top_*``. Each layer's
         lower boundary is the preceding layer's top, or zero for the first layer.
         Layers with mixing codes 0 or -1, or below the thickness tolerance, are
         skipped. Adjacent layers with the same mixing code are joined through
-        their overlapping vertical intervals into :class:`Zone` boundaries.
+        their overlapping vertical intervals into :class:`mkipp2.kipp_data.Zone`
+        boundaries.
 
         """
         xaxis_divide = self._xaxis_divisor
@@ -544,6 +572,9 @@ class KippenhahnDiagram:
 
         Notes
         -----
+        Read profiles using the fixed instance settings and return a new
+        data product. The constructor stores it as ``xyz_data``.
+
         Read headers first to determine the global vertical extent and select
         profiles, then load the required columns. The extent uses all readable
         headers, including those outside ``xlims``. Reverse the profile arrays
@@ -690,8 +721,7 @@ class KippenhahnDiagram:
             Axes on which to draw. If None, create a figure and axes.
         contour_colormap : matplotlib.colors.Colormap, optional
             Colormap for the filled contours. Defaults to ``'Blues'``
-            for most data.  For diverging fields, like ``'net_nuclear_energy'``,
-            the default is ``RdBu_r``.
+            for most data, and ``'RdBu_r'`` for ``'net_nuclear_energy'``.
         core_masses : sequence of {'He', 'C', 'O', 'CO', 'ONe', 'Fe'}, optional
             Core masses to overlay when ``yaxis='mass'``. Defaults to He, C, O;
             an empty sequence suppresses them.
@@ -699,17 +729,20 @@ class KippenhahnDiagram:
             Add axis labels and a colorbar.  Default is True.
         levels : array_like, optional
             Explicit, increasing contour levels. If None or empty, generate
-            levels from the extracted data.  For some fields, like "eps_nuc",
-            we clip the data to show only values > 1.
+            levels from the extracted data. For ``'eps_nuc'`` with automatic
+            ``'log'`` levels, the lower bound is set to zero. This corresponds
+            to an energy generation rate of one when using logarithmic data;
+            the stored data are not clipped or modified.
         level_style : str, optional
             If ``levels`` is not provided, then we can compute the levels
             as "log" (evenly spaced levels in already-logarithmic data), "linear", or
             "symmetric" (centered on zero, and adapting to data range).
-            Default is "log" for most data, but "symmetric" for data that
-            is diverging (like "net_nuclear_energy").
+            Default is "log" except for ``'net_nuclear_energy'``, which uses
+            "symmetric". Ignored when explicit levels are supplied.
         num_levels : int, optional
             Positive number of intervals used by the linear and logarithmic
-            level generators. Defaults to 8; ignored for symmetric levels.
+            level generators. Defaults to 8; ignored for symmetric or explicit
+            levels.
         show_conv, show_therm, show_semi, show_over : bool, optional
             Display convection, thermohaline mixing, semiconvection, and
             overshooting boundaries, respectively. Each defaults to True.
@@ -718,12 +751,13 @@ class KippenhahnDiagram:
         show_core_mass_legend : bool, optional
             Include core-mass lines in the second legend column. Default is True.
         show_plot : bool, optional
-            Call ``pyplot.show()`` after plotting. Default is False.
+            Call ``Figure.show()`` on the figure owning ``axis`` after plotting.
+            Default is False; an interactive backend is needed for display.
         show_rot : bool, optional
             Display rotational mixing boundaries. Default is False.
         save_file : bool, optional
-            Save the current pyplot figure after the optional show call.
-            Default is True.
+            Apply ``Figure.tight_layout()`` and save the figure owning ``axis``
+            after the optional show call. Default is True.
         save_filename : str, optional
             Output filename; its extension determines the format. Defaults to
             ``'Kippenhahn.png'``.
@@ -732,7 +766,7 @@ class KippenhahnDiagram:
         -------
         KippPlot
             Named tuple containing ``contour_plot`` (the contour set returned
-            by ``Axes.contourf``), ``histories`` (loaded ``mesa_data`` objects),
+            by ``Axes.contourf``), ``histories`` (loaded ``MesaData`` objects),
             and ``xlims`` (the extent of the selected profile coordinates,
             which can extend beyond the requested plotting limits).
 
@@ -747,10 +781,10 @@ class KippenhahnDiagram:
         two-column legend, with mixing types first and core masses second.
         When only one group is shown, the legend uses a single column.
 
-        Display and file output use pyplot. In particular,
-        ``save_file=True`` saves the current pyplot figure, which need not
-        be the figure owning a supplied ``axis``. File output occurs after
-        the optional show call.
+        Each call reuses ``xyz_data`` and ``mixing_zones`` without rereading
+        input files. New artists are added to the supplied axes; existing
+        artists are not cleared. Display and file output use the figure owning
+        those axes, or the newly created figure when ``axis`` is None.
 
         """
         xaxis_divide = self._xaxis_divisor

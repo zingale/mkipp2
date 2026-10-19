@@ -24,7 +24,32 @@ def _archive_logs_root(archive):
 
 
 def resolve_logs_dir(log_dir):
-    """Return a directory or a virtual ZIP path to its MESA files."""
+    """Return a directory or a virtual ZIP path to its MESA files.
+
+    Parameters
+    ----------
+    log_dir : str or path-like
+        Local directory, ZIP archive, or explicit directory inside an archive,
+        such as ``run.zip/LOGS``.
+
+    Returns
+    -------
+    str
+        Path normalized through ``pathlib.Path``. For an existing ZIP archive
+        supplied without an internal directory, append the unique directory
+        containing ``profiles.index`` or ``history.data``.
+
+    Raises
+    ------
+    ValueError
+        If an archive supplied without an internal directory contains zero
+        or multiple directories with MESA index or history files.
+
+    Notes
+    -----
+    Ordinary directories and explicit archive-member paths are not checked
+    for existence here.
+    """
     path = Path(log_dir)
     if path.suffix.lower() == ".zip" and path.is_file():
         with ZipFile(path) as archive:
@@ -292,9 +317,9 @@ def get_profile_paths(logs_dirs=None):
 
     Parameters
     ----------
-    logs_dirs : sequence of str, optional
-        LOGS directories or ZIP archives containing ``profiles.index`` files. Defaults to
-        ``['LOGS']``.
+    logs_dirs : sequence of str or path-like, optional
+        LOGS directories or ZIP archives containing ``profiles.index`` files.
+        Explicit paths inside archives are also accepted. Defaults to ``['LOGS']``.
 
     Returns
     -------
