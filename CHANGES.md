@@ -6,6 +6,8 @@ package.
 
 The HDF5 routines were removed.
 
+LOGS inputs can now be ZIP archives, read directly without extraction.
+
 ## History
 
 Based on `SimpleMesaKippy.py` and `Kippy.py`.

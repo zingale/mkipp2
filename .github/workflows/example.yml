@@ -29,3 +29,8 @@ jobs:
           cd example
           python example.py
 
+      - name: Run the example_zip
+        run: |
+          cd example
+          python example_zip.py
+
