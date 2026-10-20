@@ -81,6 +81,19 @@ def burning_regions_plot():
                            save_filename="Kipp-burning_regions.png")
 
 
+def hybrid_burning_regions_plot():
+
+    k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
+                                 xaxis="collapse",
+                                 time_units="yr",
+                                 identifier="net_nuclear_energy")
+
+    k.plot_burning_regions(hybrid_mode=True,
+                           core_masses=["He", "CO", "ONe", "Fe"],
+                           size=(8, 6),
+                           save_filename="Kipp-burning_regions-hybrid.png")
+
+
 def multipanel():
     # create a multi-panel plot
 
@@ -170,4 +183,5 @@ if __name__ == "__main__":
     density_contours_plot()
     si_plot()
     burning_regions_plot()
+    hybrid_burning_regions_plot()
     multipanel()

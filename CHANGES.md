@@ -13,6 +13,8 @@ Density contours can be overlaid as labeled gray lines using
 
 History burning regions can now be plotted with `plot_burning_regions()`,
 including mixing overlays. Use `load_profiles=False` for history-only input.
+Use `hybrid_mode=True` with loaded `net_nuclear_energy` profiles to show
+profile contours beneath opaque history burning regions.
 
 ## History
 
@@ -37,4 +39,3 @@ Prehistory:
   * /II.2014 (full rewrite, code cleanup and now works as a module, not a script)
   * /III.2014 (enhancement of mixing regions plotting to deal with holes and merging regions)
   * /IV.2015 stopped listing enhancements
-
