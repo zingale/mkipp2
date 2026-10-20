@@ -1040,12 +1040,16 @@ class KippenhahnDiagram:
             size=size
         )
 
-    def _plot_history_burning(self, axis, colormap, levels):
+    def _plot_history_burning(self, axis, colormap, levels, *, hybrid_mode=False):
         """Render the paths and values prepared by the burning-zone builder."""
         burning_zones = self._build_buring_zones()
         values = burning_zones.burn_types
         if levels is None or len(levels) == 0:
             limit = max(1, int(np.ceil(np.max(np.abs(values))))) if values else 1
+            if hybrid_mode:
+                finite = self.xyz_data.Z[np.isfinite(self.xyz_data.Z)]
+                if finite.size:
+                    limit = max(limit, int(np.ceil(np.max(np.abs(finite)))))
             levels = np.arange(-limit - 0.5, limit + 1.5)
         levels = np.asarray(levels, dtype=float)
         if (levels.ndim != 1 or len(levels) < 2 or not np.all(np.isfinite(levels)) or
@@ -1053,18 +1057,30 @@ class KippenhahnDiagram:
             raise ValueError("levels must contain at least two finite, increasing bin boundaries")
         colormap = plt.get_cmap(colormap)
         norm = BoundaryNorm(levels, colormap.N, clip=True)
+        if hybrid_mode:
+            axis.contourf(self.xyz_data.X, self.xyz_data.Y, self.xyz_data.Z,
+                          cmap=colormap, norm=norm, levels=levels,
+                          extend="both", antialiased=False, zorder=0.9)
         collection = PatchCollection([PathPatch(path) for path in burning_zones.zones],
                                      array=np.asarray(values), cmap=colormap,
-                                     norm=norm, edgecolors="none", antialiaseds=False)
+                                     norm=norm, edgecolors="none", antialiaseds=False,
+                                     alpha=1, zorder=1)
         axis.add_collection(collection)
         axis.autoscale_view()
         return collection
 
-    def plot_burning_regions(self, **kwargs):
+    def plot_burning_regions(self, *, hybrid_mode=False, **kwargs):
         """Plot history burning regions with mixing and stellar structure overlays.
 
         Parameters
         ----------
+        hybrid_mode : bool, optional
+            Draw profile ``net_nuclear_energy`` underneath opaque history
+            regions. Requires construction with ``load_profiles=True`` and
+            ``identifier="net_nuclear_energy"``. Default is False. Both layers
+            share the colormap and bin boundaries; automatic bins cover both
+            data sources. Profile values outside explicit bins use the endpoint
+            colors, as do history values.
         **kwargs
             Rendering options accepted by :meth:`plot`. ``levels`` gives bin
             boundaries for the signed logarithmic ``burn_type`` values; the
@@ -1088,11 +1104,19 @@ class KippenhahnDiagram:
         are stitched using the mixing-region algorithm, including splits and
         merges. No vertical rebinning is performed.
         Construct with ``load_profiles=False`` to use history files alone.
+        In hybrid mode, omitted history regions reveal the profile contours;
+        nonzero history regions take precedence at their finer time resolution.
         """
-        return self._plot(burning_regions=True, **kwargs)
+        if hybrid_mode:
+            if self.xyz_data is None:
+                raise ValueError("hybrid_mode requires load_profiles=True")
+            if self.identifier != "net_nuclear_energy":
+                raise ValueError('hybrid_mode requires identifier="net_nuclear_energy"')
+        return self._plot(burning_regions=True, hybrid_mode=hybrid_mode, **kwargs)
 
     def _plot(self, *,
               burning_regions=False,
+              hybrid_mode=False,
               axis=None,
               contour_colormap=None,
               core_masses=None,
@@ -1163,7 +1187,8 @@ class KippenhahnDiagram:
 
         # only plot if there is data
         if burning_regions:
-            contour_plot = self._plot_history_burning(axis, contour_colormap, levels)
+            contour_plot = self._plot_history_burning(axis, contour_colormap, levels,
+                                                     hybrid_mode=hybrid_mode)
         elif xyz_data.Z.size > 0:
             # Get levels if undefined
             if len(levels) == 0:

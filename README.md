@@ -188,9 +188,6 @@ giving
 If your `history-columns.list` has `burning_regions` set, then
 you can visualize the net energy from that.  This likely has higher temporal resolution
 (since a line in history is output typically every step vs. 50-100 steps between profiles).
-However, if `burning_regions` is set too small, then some of the burning regions will
-not show.  For the example data here, we used `burning_regions = 20`, but a value of `40`
-or `80` is better.
 
 The burning regions uses a different plot method:
 
@@ -208,6 +205,30 @@ k.plot_burning_regions(core_masses=["He", "CO", "ONe", "Fe"],
 giving
 
 ![kipp-burning-regions](images/Kipp-burning_regions.png)
+
+> [!IMPORTANT]
+> If `burning_regions` is set too small, then some of the burning regions
+> will not show.  For the example data here, we used `burning_regions =
+> 20`, but a value of `40` or `80` is better.
+
+To fill in burning regions missing from the history output, use
+`hybrid_mode=True`. Load profiles with `identifier="net_nuclear_energy"`:
+
+```python
+k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
+                             xaxis="collapse", time_units="yr",
+                             identifier="net_nuclear_energy")
+k.plot_burning_regions(hybrid_mode=True, size=(8, 6),
+                       save_filename="Kipp-burning_regions-hybrid.png")
+```
+
+This draws profile contours first, then opaque history regions above them.
+Zero and unused history regions leave the profiles visible. Both layers use
+the same color scale, with automatic bins spanning both data sources.  This
+results in the following plot:
+
+![kipp-burning-regions-hybrid](Kipp-burning_regions-hybrid.png)
+
 
 ### Advanced plotting
 
