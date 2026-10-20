@@ -24,13 +24,13 @@ jobs:
       - name: Install mkipp2
         run: pip install .
 
-      - name: Run the example
+      - name: Run the examples
         run: |
           cd example
-          python example.py
+          python examples.py
 
-      - name: Run the example_zip
+      - name: Run the old examples
         run: |
           cd example
-          python example_zip.py
+          python examples_old.py
 
