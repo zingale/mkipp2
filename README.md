@@ -227,7 +227,7 @@ Zero and unused history regions leave the profiles visible. Both layers use
 the same color scale, with automatic bins spanning both data sources.  This
 results in the following plot:
 
-![kipp-burning-regions-hybrid](Kipp-burning_regions-hybrid.png)
+![kipp-burning-regions-hybrid](images/Kipp-burning_regions-hybrid.png)
 
 
 ### Advanced plotting
