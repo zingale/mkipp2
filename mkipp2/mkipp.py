@@ -1368,13 +1368,18 @@ class KippenhahnDiagram:
             # Measure arc lengths only after limits and the colorbar/layout
             # have established the visible axes rectangle.
             fig.canvas.draw()
-            for level, segments in zip(density_plot.levels, density_plot.allsegs):
+            positions = []
+            for segments in density_plot.allsegs:
                 candidates = [_visible_contour_midpoint(segment, axis) for segment in segments]
                 position, length = max(candidates, key=lambda candidate: candidate[1],
                                        default=(None, 0))
                 if length:
-                    axis.clabel(density_plot, levels=[level], fmt=density_formats, inline=True,
-                                fontsize="small", manual=[position])
+                    positions.append(position)
+            if positions:
+                # Keep all levels available: some Matplotlib versions index
+                # manual labels by contour index, even for a subset of levels.
+                axis.clabel(density_plot, fmt=density_formats, inline=True,
+                            fontsize="small", manual=positions)
 
         if show_plot:
             fig.show()
