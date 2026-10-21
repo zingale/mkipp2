@@ -1153,10 +1153,8 @@ class KippenhahnDiagram:
         core_masses = tuple(core_masses) if core_masses is not None else ("He", "CO", "ONe")
         for core_mass in core_masses:
             if core_mass not in _CORE_MASS_STYLES:
-                raise ValueError(
-                    f"Unknown core mass {core_mass!r}; supported names: "
-                    + ", ".join(_CORE_MASS_STYLES)
-                )
+                raise ValueError(f"Unknown core mass {core_mass!r}; supported names: " +
+                                 ", ".join(_CORE_MASS_STYLES))
 
         density_levels = np.asarray([] if density_contours is None else density_contours,
                                     dtype=float)
