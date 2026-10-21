@@ -30,6 +30,62 @@ _CORE_MASS_STYLES = {
 }
 
 
+def _region_indices(history, type_prefix, top_prefix, label, *, allow_empty=False):
+    """Validate paired region columns numbered consecutively from one.
+
+    Parameters
+    ----------
+    history : mkipp2.mesa_data.MesaData
+        History whose column names are checked. Its filename is included in
+        validation errors; column values need not be loaded.
+    type_prefix : str
+        Prefix for region classification columns, such as ``'mix_type_'``.
+    top_prefix : str
+        Prefix for region upper-bound columns, such as ``'mix_qtop_'``.
+    label : str
+        Region family name used in error messages, such as ``'Mixing'``.
+    allow_empty : bool, optional
+        Allow both column families to be absent and return an empty list.
+        Default is False. Incomplete pairs are always rejected.
+
+    Returns
+    -------
+    list of int
+        Validated region indices in ascending order, numbered consecutively
+        from one. Empty when both families are absent and ``allow_empty``
+        is True.
+
+    Raises
+    ------
+    ValueError
+        If columns are unpaired, are not consecutively numbered from one,
+        or are absent when ``allow_empty`` is False.
+    """
+    # Select numbered columns for this coordinate and region family only,
+    # e.g. mix_type_1 and mix_qtop_1 for mass-based mixing regions.
+    type_columns = {key for key in history.columns
+                    if re.fullmatch(re.escape(type_prefix) + r"\d+", key)}
+    top_columns = {key for key in history.columns
+                   if re.fullmatch(re.escape(top_prefix) + r"\d+", key)}
+    # Mixing may be absent entirely, but a family with only types or only
+    # tops is incomplete and must still fail validation below.
+    if allow_empty and not type_columns and not top_columns:
+        return []
+    # N type columns must have exactly the suffixes 1 through N, with a
+    # matching top for each. Comparing complete names also rejects gaps,
+    # zero-based numbering, and noncanonical suffixes such as "01".
+    indices = list(range(1, len(type_columns) + 1))
+    if (not indices or
+            type_columns != {f"{type_prefix}{i}" for i in indices} or
+            top_columns != {f"{top_prefix}{i}" for i in indices}):
+        raise ValueError(
+            f"{label} regions require consecutive paired {type_prefix}N and {top_prefix}N "
+            f"columns numbered from 1 in {history.filename}; "
+            f"found type columns {sorted(type_columns)} and top columns {sorted(top_columns)}"
+        )
+    return indices
+
+
 def format_scientific(value):
     """Format a positive finite value as scientific notation for MathText.
 
@@ -534,7 +590,8 @@ class KippenhahnDiagram:
         Raises
         ------
         ValueError
-            If history files have different data column names.
+            If history files have different data column names, or the selected
+            mixing columns are unpaired or not consecutively numbered from one.
 
         Notes
         -----
@@ -549,6 +606,9 @@ class KippenhahnDiagram:
         skipped. Adjacent layers with the same mixing code are joined through
         their overlapping vertical intervals into :class:`mkipp2.kipp_data.Zone`
         boundaries.
+
+        An entirely absent mixing-column family is allowed and produces no
+        mixing regions. A partially specified family is rejected.
 
         """
         xaxis_divide = self._xaxis_divisor
@@ -566,6 +626,7 @@ class KippenhahnDiagram:
         histories = []
         reference_columns = None
         reference_path = None
+        indices = []
         for history_name in self.history_paths:
             history = md.MesaData(history_name, read_data=False)
             history_columns = set(history.columns)
@@ -580,6 +641,7 @@ class KippenhahnDiagram:
                     f"{str(reference_path)!r}: missing columns {missing}; extra columns {extra}. "
                     "All history files must have the same data column names."
                 )
+            indices = _region_indices(history, type_prefix, top_prefix, "Mixing", allow_empty=True)
             columns = [
                 key for key in history.columns
                 if key in required or
@@ -603,21 +665,11 @@ class KippenhahnDiagram:
                 y_coords.extend(history.get('star_mass'))
 
         print("Constructing mixing regions")
-        mesa_mix_zones = 0
-        while True:
-            try:
-                mesa_mix_zones = mesa_mix_zones + 1
-                mix_type = []
-                mix_top = []
-                for history in histories:
-                    mix_type.extend(history.get(f"{type_prefix}{mesa_mix_zones}"))
-                    mix_top.extend(history.get(f"{top_prefix}{mesa_mix_zones}"))
-                mix_data.append([mix_type, mix_top])
-            except Exception:
-                # reached all mix zones included
-                mesa_mix_zones = mesa_mix_zones - 1
-                print("there are " + str(mesa_mix_zones) + " mixing zones")
-                break
+        for region in indices:
+            mix_type = np.concatenate([history.get(f"{type_prefix}{region}") for history in histories])
+            mix_top = np.concatenate([history.get(f"{top_prefix}{region}") for history in histories])
+            mix_data.append((mix_type, mix_top))
+        print(f"there are {len(indices)} mixing zones")
 
         if self.yaxis == "radius":
             tolerance = self.radius_tolerance
@@ -660,13 +712,7 @@ class KippenhahnDiagram:
         histories = self.mixing_zones.histories
         if not histories:
             raise ValueError("No histories available for burning regions")
-        indices = sorted(int(key[len(type_prefix):]) for key in histories[0].columns
-                         if re.fullmatch(re.escape(type_prefix) + r"\d+", key))
-        top_indices = sorted(int(key[len(top_prefix):]) for key in histories[0].columns
-                             if re.fullmatch(re.escape(top_prefix) + r"\d+", key))
-        if not indices or indices != top_indices or indices != list(range(1, max(indices) + 1)):
-            raise ValueError(f"Burning regions require consecutive paired {type_prefix}N and {top_prefix}N "
-                             f"columns in {histories[0].filename}")
+        indices = _region_indices(histories[0], type_prefix, top_prefix, "Burning")
         x = np.asarray(self.mixing_zones.x_coords)
         surface = np.asarray(self.mixing_zones.y_coords)
         region_data = []
@@ -1277,7 +1323,8 @@ class KippenhahnDiagram:
                 hatch = ""
                 line = 0
             patch = PathPatch(zone, fill=False, hatch=hatch,
-                              edgecolor=color, linewidth=line, label=label)
+                              edgecolor=color, alpha=0.8,
+                              linewidth=line, label=label)
             axis.add_patch(patch)
             if line:
                 mixing_handles.setdefault(mixing_zones.mix_types[i], patch)
