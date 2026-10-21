@@ -1263,7 +1263,8 @@ class KippenhahnDiagram:
                 hatch = ""
                 line = 0
             patch = PathPatch(zone, fill=False, hatch=hatch,
-                              edgecolor=color, linewidth=line, label=label)
+                              edgecolor=color, alpha=0.8,
+                              linewidth=line, label=label)
             axis.add_patch(patch)
             if line:
                 mixing_handles.setdefault(mixing_zones.mix_types[i], patch)
