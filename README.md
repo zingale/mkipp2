@@ -4,7 +4,8 @@ Kippenhahn plotter for MESA.
 
 > [!NOTE]
 > This is a clean-up of the [mkipp](https://github.com/orlox/mkipp) project.
-> See `CHANGES.md` for history.
+> All of the hard work in crafting the initial style of these plots
+> was done by that project.  See `CHANGES.md` for history.
 
 > [!IMPORTANT]
 > Your `history_columns.list` needs to have `mixing_regions` and
@@ -59,8 +60,7 @@ import mkipp2
 
 k = mkipp2.KippenhahnDiagram(
     logs_dirs=["example/LOGS-mesa-26.04.1.zip"],
-    identifier="net_nuclear_energy", log10_on_data=False,
-)
+    identifier="net_nuclear_energy", log10_on_data=False)
 k.plot(core_masses=[])
 ```
 
@@ -95,14 +95,17 @@ k.plot(core_masses=["He", "CO", "ONe", "Fe"],
 ```
 
 This results in the following plot
+
 ![kipp-basic](images/Kipp-basic.png)
 
 In this case, we are getting the mixing regions from the history file
-(this relies on `mixing_regions` being set in your
-`history_columns.list`---`40` is a good value) and the values of the
-energy generation from the profiles.  As we'll see below, if `burning_regions`
-are defined, we can make an analogous plot.
+and the values of the energy generation from the profiles.  As we'll
+see below, if `burning_regions` are defined, we can make an analogous
+plot.
 
+> [!NOTE]
+> This relies on `mixing_regions` being set in your
+> `history_columns.list`---`40` is a good value.
 
 We can instead plot in terms of stellar age:
 
@@ -118,6 +121,7 @@ k.plot(core_masses=["He", "CO", "ONe", "Fe"],
 ```
 
 This results in the following plot
+
 ![kipp-age](images/Kipp-age.png)
 
 
@@ -139,6 +143,7 @@ k.plot(core_masses=["He", "CO", "ONe", "Fe"],
 ```
 
 This results in the following plot
+
 ![kipp-collapse](images/Kipp-collapse.png)
 
 We can also add contours of density:
@@ -157,6 +162,7 @@ k.plot(core_masses=["He", "CO", "ONe", "Fe"],
 ```
 
 giving
+
 ![kipp-collapse-density](images/Kipp-collapse-density.png)
 
 
@@ -180,14 +186,16 @@ k.plot(core_masses=["He", "CO", "ONe", "Fe"],
 ```
 
 giving
+
 ![kipp-si](images/Kipp-si.png)
 
 
 ### Burning regions
 
-If your `history-columns.list` has `burning_regions` set, then
-you can visualize the net energy from that.  This likely has higher temporal resolution
-(since a line in history is output typically every step vs. 50-100 steps between profiles).
+If your `history-columns.list` has `burning_regions` set, then you can
+visualize the net energy from that.  This likely has higher temporal
+resolution (since a line in history is output typically every step
+vs. 50-100 steps between profiles).
 
 The burning regions uses a different plot method:
 
@@ -212,7 +220,8 @@ giving
 > 20`, but a value of `40` or `80` is better.
 
 To fill in burning regions missing from the history output, use
-`hybrid_mode=True`. Load profiles with `identifier="net_nuclear_energy"`:
+`hybrid_mode=True`. Load profiles with
+`identifier="net_nuclear_energy"`:
 
 ```python
 k = mkipp2.KippenhahnDiagram(logs_dirs=["LOGS-mesa-26.04.1.zip"],
@@ -222,18 +231,18 @@ k.plot_burning_regions(hybrid_mode=True, size=(8, 6),
                        save_filename="Kipp-burning_regions-hybrid.png")
 ```
 
-This draws profile contours first, then opaque history regions above them.
-Zero and unused history regions leave the profiles visible. Both layers use
-the same color scale, with automatic bins spanning both data sources.  This
-results in the following plot:
+This draws profile contours first, then opaque history regions above
+them.  Zero and unused history regions leave the profiles
+visible. Both layers use the same color scale, with automatic bins
+spanning both data sources.  This results in the following plot:
 
 ![kipp-burning-regions-hybrid](images/Kipp-burning_regions-hybrid.png)
 
 
 ### Advanced plotting
 
-You can setup the figure and axes yourself and split the data into multiple views.
-Here's a split view of the evolution that breaks at H, He, and O core depletion.
-See the `examples.py` for the script.
+You can setup the figure and axes yourself and split the data into
+multiple views.  Here's a split view of the evolution that breaks at
+H, He, and O core depletion.  See the `examples.py` for the script.
 
 ![kipp-split](images/Kipp-split.png)
