@@ -20,6 +20,16 @@ import mkipp2.kipp_data as kipp
 import mkipp2.mesa_data as md
 
 
+_CORE_MASS_STYLES = {
+    "He": ("he_core_mass", "C0:"),
+    "C": ("c_core_mass", "C1:"),
+    "O": ("o_core_mass", "C2:"),
+    "CO": ("co_core_mass", "C1:"),
+    "ONe": ("one_core_mass", "C2:"),
+    "Fe": ("fe_core_mass", "C3:"),
+}
+
+
 def _region_indices(history, type_prefix, top_prefix, label, *, allow_empty=False):
     """Validate paired region columns numbered consecutively from one.
 
@@ -990,7 +1000,8 @@ class KippenhahnDiagram:
             for most data, and ``'RdBu_r'`` for ``'net_nuclear_energy'``.
         core_masses : sequence of {'He', 'C', 'O', 'CO', 'ONe', 'Fe'}, optional
             Core masses to overlay when ``yaxis='mass'``. Defaults to He, CO, ONe;
-            an empty sequence suppresses them.
+            an empty sequence suppresses them. Unknown names raise ValueError
+            before any plot artists are created.
         density_contours : sequence of float, optional
             Densities in g/cm^3 to overlay as gray lines with inline density
             labels. Values must be finite and positive; they are sorted and
@@ -1185,6 +1196,12 @@ class KippenhahnDiagram:
         """Render either data source with the shared overlays and decorations."""
         xaxis_divide = self._xaxis_divisor
 
+        core_masses = tuple(core_masses) if core_masses is not None else ("He", "CO", "ONe")
+        for core_mass in core_masses:
+            if core_mass not in _CORE_MASS_STYLES:
+                raise ValueError(f"Unknown core mass {core_mass!r}; supported names: " +
+                                 ", ".join(_CORE_MASS_STYLES))
+
         density_levels = np.asarray([] if density_contours is None else density_contours,
                                     dtype=float)
         if (density_levels.ndim != 1 or not np.all(np.isfinite(density_levels)) or
@@ -1221,9 +1238,6 @@ class KippenhahnDiagram:
             level_style = "log"
             if self.identifier == "net_nuclear_energy":
                 level_style = "symmetric"
-
-        if core_masses is None:
-            core_masses = ["He", "CO", "ONe"]
 
         if contour_colormap is None:
             if burning_regions or self.identifier == "net_nuclear_energy":
@@ -1347,26 +1361,8 @@ class KippenhahnDiagram:
         # add core masses
         core_mass_handles = {}
         if self.yaxis == "mass":
-            field_name = ""
             for core_mass in core_masses:
-                if core_mass == "He":
-                    field_name = "he_core_mass"
-                    color = "C0:"
-                elif core_mass == "C":
-                    field_name = "c_core_mass"
-                    color = "C1:"
-                elif core_mass == "O":
-                    field_name = "o_core_mass"
-                    color = "C2:"
-                elif core_mass == "CO":
-                    field_name = "co_core_mass"
-                    color = "C1:"
-                elif core_mass == "ONe":
-                    field_name = "one_core_mass"
-                    color = "C2:"
-                elif core_mass == "Fe":
-                    field_name = "fe_core_mass"
-                    color = "C3:"
+                field_name, color = _CORE_MASS_STYLES[core_mass]
                 for history in mixing_zones.histories:
                     core_line, = axis.plot(
                         self.function_on_xaxis(history.get(self._xaxis_column) / xaxis_divide),
