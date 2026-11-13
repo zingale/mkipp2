@@ -26,7 +26,7 @@ _CORE_MASS_STYLES = {
     "O": ("o_core_mass", "C2:"),
     "CO": ("co_core_mass", "C1:"),
     "ONe": ("one_core_mass", "C2:"),
-    "Fe": ("fe_core_mass", "C3:"),
+    "Fe": ("fe_core_mass", "C7:"),
 }
 
 
@@ -1301,7 +1301,7 @@ class KippenhahnDiagram:
             # Semiconvective mixing
             elif mixing_zones.mix_types[i] == 3 and show_semi:
                 label = "Semiconvection"
-                color = "red"
+                color = "hotpink"
                 hatch = "\\\\"
                 line = 1
             # Thermohaline mixing
