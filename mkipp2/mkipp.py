@@ -11,7 +11,7 @@ import re
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import PatchCollection
+from matplotlib.collections import PatchCollection, PolyCollection
 from matplotlib.colors import BoundaryNorm
 from matplotlib.patches import Patch, PathPatch
 from matplotlib.ticker import MaxNLocator
@@ -728,82 +728,124 @@ class KippenhahnDiagram:
     def _build_region_paths(self, region_data, x_coords, y_coords, *, skip_types, tolerance):
         """Stitch adjacent equal-valued history layers into connected paths.
 
-        Each entry in region_data contains a type/value array and a fractional
-        upper-bound array. Zone tracks splits and merges, preserving holes in
-        the resulting compound paths. Skipped values still define the lower
-        boundary of the next layer. Intervals outside xlims close open zones.
+        This sweep is shared by mixing and burning regions. Each entry in
+        region_data describes one layer across all history samples: its type
+        (mixing code or signed burning level) and fractional upper boundary.
+        y_coords supplies the stellar mass or radius at each sample.
+
+        Sample i describes a rectangle spanning x_coords[i-1] to x_coords[i].
+        Rectangles connect only to overlapping rectangles of the same type
+        in the preceding interval. A Zone retains linked block vertices so
+        splits and merges can form compound paths with holes, without a
+        geometric union operation. Completed paths and their types are
+        returned in corresponding order.
+
+        Precompute layer bounds and validity with NumPy, then visit only
+        valid layers in the Python sweep. Candidate zones are indexed by
+        type, and a stable sort keeps their vertical traversal order.
         """
         zones = []
         region_types = []
         open_zones = []
-        new_zones = []
-        for i in range(1, len(x_coords)):
-            current_x = x_coords[i]
-            previous_x = x_coords[i-1]
-            include = (self.xlims is None or
-                       (max(previous_x, current_x) >= self.xlims[0] and
-                        min(previous_x, current_x) <= self.xlims[1]))
-            # Empty intervals still close open zones, preventing joins across gaps.
-            for j in (range(len(region_data)) if include else ()):
-                region_type = region_data[j][0][i]
-                if region_type in skip_types:
-                    continue
-                max_y_coord = region_data[j][1][i] * y_coords[i]
-                min_y_coord = 0
-                if j > 0:
-                    min_y_coord = region_data[j-1][1][i] * y_coords[i]
-                max_y_coord = min(max_y_coord, y_coords[i])
-                if (not np.all(np.isfinite([previous_x, current_x, min_y_coord, max_y_coord, region_type])) or
-                        min_y_coord < 0 or max_y_coord <= min_y_coord):
-                    continue
-                # ignore too small regions
-                if max_y_coord - min_y_coord < tolerance*y_coords[i]:
-                    continue
-                zone_block = kipp.ZoneBlock(previous_x, current_x, min_y_coord, max_y_coord)
-                exists = False
-                zones_to_merge = []
-                for z in open_zones:
-                    if z.extend(zone_block.vertices[1], zone_block.vertices[1].prev_vertex,
-                                region_type):
-                        exists = True
-                        z.new_blocks.append(zone_block)
-                        zones_to_merge.append(z)
-                # merge zones as needed
-                for k in range(1, len(zones_to_merge)):
-                    zones_to_merge[0].merge_zone(zones_to_merge[k])
-                    open_zones.remove(zones_to_merge[k])
-                # create zone if it has no predecessor
-                if not exists:
-                    z = kipp.Zone(zone_block, region_type)
-                    new_zones.append(z)
-            open_zones.extend(new_zones)
-            new_zones = []
-            # separate zones which didn't continue here so we don't need
-            # to check them all the time
-            for z in open_zones:
-                z.switch_new_blocks()
-            for z in list(open_zones):
-                if len(z.last_blocks) == 0:
-                    zones.append(z.get_path())
-                    region_types.append(z.mix_type)
-                    open_zones.remove(z)
-            # order zones
-            temp_open_zones = []
-            while len(open_zones) > 0:
-                min_y = -1
-                j = -1
-                for i, zone in enumerate(open_zones):
-                    for block in zone.last_blocks:
-                        if block.vertices[0].coords[1] < min_y or min_y < 0:
-                            min_y = block.vertices[0].coords[1]
-                            j = i
-                temp_open_zones.append(open_zones.pop(j))
-            open_zones = temp_open_zones
+        if not region_data or len(x_coords) < 2:
+            return zones, region_types
 
-        for z in open_zones:
-            z.switch_new_blocks()
-            zones.append(z.get_path())
-            region_types.append(z.mix_type)
+        x = np.asarray(x_coords)
+        surface = np.asarray(y_coords)
+        # Arrays have shape (number of layers, number of history samples).
+        # Convert fractional layer tops to enclosed mass or radius in bulk.
+        types = np.asarray([region[0] for region in region_data])
+        tops = np.asarray([region[1] for region in region_data]) * surface
+        # Lower boundaries use the preceding layer's *unclipped* top, even
+        # when that preceding layer is skipped or invalid.
+        bottoms = np.empty_like(tops)
+        bottoms[0] = 0
+        bottoms[1:] = tops[:-1]
+        tops = np.minimum(tops, surface)
+        # Reject skipped codes, invalid coordinates, inverted layers, and
+        # layers thinner than tolerance times the local stellar surface.
+        # Doing this once avoids allocating a small NumPy array for every
+        # layer in every interval. Equality at the tolerance is retained.
+        valid = (np.isfinite(types) & np.isfinite(bottoms) & np.isfinite(tops) &
+                 ~np.isin(types, skip_types) & (bottoms >= 0) & (tops > bottoms) &
+                 ~((tops - bottoms) < tolerance * surface))
+        # An interval needs two finite endpoints. Test overlap using min/max
+        # so increasing ages and decreasing collapse coordinates both work.
+        # Keep entire intervals that cross xlims rather than clipping blocks.
+        intervals = np.isfinite(x[:-1]) & np.isfinite(x[1:])
+        if self.xlims is not None:
+            intervals &= ((np.maximum(x[:-1], x[1:]) >= self.xlims[0]) &
+                          (np.minimum(x[:-1], x[1:]) <= self.xlims[1]))
+        # Column zero has no preceding interval and is never swept.
+        valid[:, 1:] &= intervals
+
+        for i in range(1, len(x)):
+            # Only the preceding interval can extend a zone. Index its zones
+            # by type to avoid testing unrelated mixing codes/burning levels.
+            # Preserve their order within each type: vertex splicing depends
+            # on visiting overlapping predecessors in the same order.
+            candidates_by_type = {}
+            for zone in open_zones:
+                candidates_by_type.setdefault(zone.mix_type, []).append(zone)
+            # Merged zones are removed from candidate lists immediately, but
+            # filtered from open_zones at the end instead of repeatedly
+            # searching and removing entries from that full list.
+            merged_zones = set()
+            new_zones = []
+            # flatnonzero visits valid layers from bottom to top. New zones
+            # stay out of the candidate index: blocks in the same interval
+            # must not extend each other.
+            for j in np.flatnonzero(valid[:, i]):
+                region_type = types[j, i]
+                zone_block = kipp.ZoneBlock(x[i-1], x[i], bottoms[j, i], tops[j, i])
+                candidates = candidates_by_type.get(region_type, ())
+                zones_to_merge = []
+                for zone in candidates:
+                    # extend rewires boundary links where the block overlaps
+                    # a predecessor; several new blocks may extend one zone
+                    # when a region splits.
+                    if zone.extend(zone_block.vertices[1], zone_block.vertices[1].prev_vertex,
+                                   region_type):
+                        zone.new_blocks.append(zone_block)
+                        zones_to_merge.append(zone)
+                if zones_to_merge:
+                    # A block spanning several predecessors joins them into
+                    # the first zone. Their already-spliced links retain any
+                    # holes; merge_zone combines their block inventories.
+                    for zone in zones_to_merge[1:]:
+                        zones_to_merge[0].merge_zone(zone)
+                        candidates.remove(zone)
+                        merged_zones.add(zone)
+                else:
+                    new_zones.append(kipp.Zone(zone_block, region_type))
+
+            # Advance the sweep: new_blocks become last_blocks, and older
+            # blocks are archived for eventual boundary traversal. No new
+            # blocks means the zone ended here, including at an invalid or
+            # excluded interval, so it cannot reconnect across a gap.
+            continuing_zones = []
+            for zone in open_zones + new_zones:
+                if zone in merged_zones:
+                    continue
+                zone.switch_new_blocks()
+                if zone.last_blocks:
+                    continuing_zones.append(zone)
+                else:
+                    zones.append(zone.get_path())
+                    region_types.append(zone.mix_type)
+            # Order each zone by its lowest surviving block. One stable sort
+            # replaces the old repeated minimum searches; equal heights keep
+            # their first-encountered order and therefore the same path order.
+            open_zones = sorted(continuing_zones,
+                                key=lambda zone: min(block.vertices[0].coords[1]
+                                                     for block in zone.last_blocks))
+
+        # No following interval will close the surviving zones. Archive the
+        # final blocks and consume their boundary links to finish the paths.
+        for zone in open_zones:
+            zone.switch_new_blocks()
+            zones.append(zone.get_path())
+            region_types.append(zone.mix_type)
 
         return zones, region_types
 
@@ -1284,50 +1326,34 @@ class KippenhahnDiagram:
         mixing_zones = self.mixing_zones
         mixing_handles = {}
 
-        for i, zone in enumerate(mixing_zones.zones):
-            color = ""
-            # Convective mixing
-            if mixing_zones.mix_types[i] == 1 and show_conv:
-                label = "Convection"
-                color = "Chartreuse"
-                hatch = "//"
-                line = 1
-            # Overshooting
-            elif mixing_zones.mix_types[i] == 2 and show_over:
-                label = "Overshooting"
-                color = "purple"
-                hatch = "x"
-                line = 1
-            # Semiconvective mixing
-            elif mixing_zones.mix_types[i] == 3 and show_semi:
-                label = "Semiconvection"
-                color = "hotpink"
-                hatch = "\\\\"
-                line = 1
-            # Thermohaline mixing
-            elif mixing_zones.mix_types[i] == 4 and show_therm:
-                label = "Thermohaline"
-                color = "Gold"  # Salmon
-                hatch = "||"
-                line = 1
-            # Rotational mixing
-            elif mixing_zones.mix_types[i] == 5 and show_rot:
-                label = "Rotational"
-                color = "brown"
-                hatch = "*"
-                line = 1
-            # Anonymous mixing
-            else:
-                label = "_nolegend_"
-                color = "white"
-                hatch = ""
-                line = 0
-            patch = PathPatch(zone, fill=False, hatch=hatch,
-                              edgecolor=color, alpha=0.8,
-                              linewidth=line, label=label)
-            axis.add_patch(patch)
-            if line:
-                mixing_handles.setdefault(mixing_zones.mix_types[i], patch)
+        mixing_styles = {
+            1: (show_conv, "Convection", "Chartreuse", "//"),
+            2: (show_over, "Overshooting", "purple", "x"),
+            3: (show_semi, "Semiconvection", "hotpink", "\\\\"),
+            4: (show_therm, "Thermohaline", "Gold", "||"),
+            5: (show_rot, "Rotational", "brown", "*"),
+        }
+        paths_by_type = {}
+        # Paths and mixing-type codes correspond by position. Pair them to
+        # group visible paths by type for one collection per mixing style.
+        for zone, mix_type in zip(mixing_zones.zones, mixing_zones.mix_types):
+            if mix_type in mixing_styles and mixing_styles[mix_type][0]:
+                paths_by_type.setdefault(mix_type, []).append(zone)
+
+        for mix_type, paths in paths_by_type.items():
+            _, label, color, hatch = mixing_styles[mix_type]
+            # Preserve compound-path codes (including holes) without creating
+            # a separate PathPatch artist for every region. PolyCollection also
+            # lets automatic legend placement account for the region geometry.
+            collection = PolyCollection([], facecolors="none", edgecolors=color,
+                                        hatch=hatch, alpha=0.8, linewidths=1,
+                                        label=label)
+            collection.set_verts_and_codes([path.vertices for path in paths],
+                                          [path.codes for path in paths])
+            axis.add_collection(collection)
+            mixing_handles[mix_type] = Patch(fill=False, hatch=hatch,
+                                             edgecolor=color, alpha=0.8,
+                                             linewidth=1, label=label)
 
         # limit x_coords to data of contours and add line at stellar surface
         for i, x_coord in enumerate(mixing_zones.x_coords):
@@ -1433,9 +1459,10 @@ class KippenhahnDiagram:
             fig.tight_layout()
 
         if density_plot is not None:
-            # Measure arc lengths only after limits and the colorbar/layout
-            # have established the visible axes rectangle.
-            fig.canvas.draw()
+            # Resolve layout and transforms before measuring visible contour
+            # lengths. Skip rendering the artists here; saving or displaying
+            # the figure will render them after the labels have been added.
+            fig.draw_without_rendering()
             positions = []
             for segments in density_plot.allsegs:
                 candidates = [_visible_contour_midpoint(segment, axis) for segment in segments]
