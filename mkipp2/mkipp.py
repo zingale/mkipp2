@@ -6,7 +6,7 @@ input paths are discovered from ``history.data`` and ``profiles.index`` in
 the LOGS directory. Profile columns depend on the chosen y axis and extractor;
 history columns include stellar coordinates, mixing regions, and core masses.
 """
-from collections import namedtuple
+from collections import deque, namedtuple
 import re
 
 import matplotlib.pyplot as plt
@@ -807,6 +807,9 @@ class KippenhahnDiagram:
 
         return zones, region_types
 
+    # One session spans both passes below: reuse ZIP handles while loading
+    # this diagram, then close them when the method returns or raises.
+    @md._read_session()
     def _build_xyz_data(self):
         """Interpolate a profile quantity onto a common vertical contour grid.
 
@@ -831,10 +834,12 @@ class KippenhahnDiagram:
         Read profiles using the fixed instance settings and return a new
         data product. The constructor stores it as ``xyz_data``.
 
-        Read headers first to determine the global vertical extent and select
-        profiles, then load the required columns. The extent uses all readable
-        headers, including those outside ``xlims``. Reverse the profile arrays
-        from surface-to-center order before interpolating with ``np.interp``.
+        Read headers and column mappings once to determine the global vertical
+        extent and select profiles, then load the required columns. ZIP handles
+        are shared across both passes and closed when this method exits.
+        The extent uses all readable headers, including those outside ``xlims``.
+        Reverse the profile arrays from surface-to-center order before
+        interpolating with ``np.interp``.
         Values outside each profile's coordinate range use endpoint values;
         points above the stellar surface are not masked here.
 
@@ -849,11 +854,18 @@ class KippenhahnDiagram:
         max_y = 0
         print("Reading profile data")
 
-        # read headers to determine required range in y coordinate
+        # Pass 1: determine the global vertical extent before interpolating
+        # anything. Include headers outside xlims so restricting the time
+        # range does not change the common mass/radius grid.
+        # read_data=False retains headers and column mappings, without loading
+        # numeric rows. Reuse these MesaData objects in pass 2 rather than
+        # constructing them again and reparsing each profile's preamble.
+        profiles = []
         prof_include = [False] * len(self.profile_paths)
         for i, profile_name in enumerate(self.profile_paths):
             try:
-                prof = md.MesaData(profile_name, only_read_header=True)
+                prof = md.MesaData(profile_name, read_data=False)
+                profiles.append(prof)
                 if self.yaxis == "mass":
                     max_y = max(prof.header['star_mass'], max_y)
                 elif self.yaxis == "radius":
@@ -873,11 +885,14 @@ class KippenhahnDiagram:
             except Exception as e:
                 raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
 
-        # Filter out profiles outside the selected range and its neighbors.
-        profile_paths = [pp for (pp, pi) in zip(self.profile_paths, prof_include) if pi]
-        assert len(profile_paths) >= 2, (
+        # Keep the selected metadata in profile order, including neighbors
+        # needed to cover the plot borders. A deque lets pass 2 remove each
+        # object from the front in constant time as it is consumed.
+        profiles = deque(prof for prof, include in zip(profiles, prof_include) if include)
+        num_profiles = len(profiles)
+        assert num_profiles >= 2, (
             "At least 2 profiles are required after header reading and selection; "
-            f"got {len(profile_paths)}."
+            f"got {num_profiles}."
         )
 
         # array to interpolate data in the yaxis
@@ -901,18 +916,24 @@ class KippenhahnDiagram:
                                            None, return_data_columns=True))
 
         # Initialize interpolation grid
-        Z_data_array = np.zeros((self.yresolution, len(profile_paths)))
+        Z_data_array = np.zeros((self.yresolution, num_profiles))
         self._log_density = np.full_like(Z_data_array, np.nan)
         self._missing_density_profiles = []
 
         # XY coordinates for data
-        X_data_array = np.zeros((self.yresolution, len(profile_paths)))
-        Y_data_array = np.zeros((self.yresolution, len(profile_paths)))
+        X_data_array = np.zeros((self.yresolution, num_profiles))
+        Y_data_array = np.zeros((self.yresolution, num_profiles))
         for j in range(self.yresolution):
             Y_data_array[j, :] = max_y * j / (self.yresolution-1)
-        for i, profile_name in enumerate(profile_paths):
+        # Pass 2: load only selected profiles, using their cached column maps.
+        # Each body is read through the binary buffer and interpolated onto
+        # the common grid; raw numeric profiles are not accumulated in a cache.
+        for i in range(num_profiles):
+            # Removing the queue reference lets each completed profile be
+            # released after its interpolation, keeping bodies transient.
+            prof = profiles.popleft()
+            profile_name = prof.filename
             try:
-                prof = md.MesaData(profile_name, read_data=False)
                 density_column = next((name for name in ("logRho", "rho")
                                        if name in prof.columns), None)
                 prof.read_data(columns + ([density_column] if density_column else []))
