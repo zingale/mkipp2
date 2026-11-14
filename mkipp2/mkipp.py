@@ -7,6 +7,7 @@ the LOGS directory. Profile columns depend on the chosen y axis and extractor;
 history columns include stellar coordinates, mixing regions, and core masses.
 """
 from collections import deque, namedtuple
+from contextlib import ExitStack
 import re
 
 import matplotlib.pyplot as plt
@@ -807,9 +808,6 @@ class KippenhahnDiagram:
 
         return zones, region_types
 
-    # One session spans both passes below: reuse ZIP handles while loading
-    # this diagram, then close them when the method returns or raises.
-    @md._read_session()
     def _build_xyz_data(self):
         """Interpolate a profile quantity onto a common vertical contour grid.
 
@@ -844,151 +842,165 @@ class KippenhahnDiagram:
         points above the stellar surface are not masked here.
 
         """
-        xaxis_divide = self._xaxis_divisor
+        # This method owns the archive handles. ExitStack closes them on
+        # return or failure; each MesaData read closes only its member stream.
+        with ExitStack() as stack:
+            archives = {}
+            xaxis_divide = self._xaxis_divisor
 
-        # Extract data from profiles
-        max_x_coord = float('-inf')
-        min_x_coord = float('+inf')
+            # Extract data from profiles
+            max_x_coord = float('-inf')
+            min_x_coord = float('+inf')
 
-        # first read all headers to determine max value on yaxis
-        max_y = 0
-        print("Reading profile data")
+            # first read all headers to determine max value on yaxis
+            max_y = 0
+            print("Reading profile data")
 
-        # Pass 1: determine the global vertical extent before interpolating
-        # anything. Include headers outside xlims so restricting the time
-        # range does not change the common mass/radius grid.
-        # read_data=False retains headers and column mappings, without loading
-        # numeric rows. Reuse these MesaData objects in pass 2 rather than
-        # constructing them again and reparsing each profile's preamble.
-        profiles = []
-        prof_include = [False] * len(self.profile_paths)
-        for i, profile_name in enumerate(self.profile_paths):
-            try:
-                prof = md.MesaData(profile_name, read_data=False)
-                profiles.append(prof)
-                if self.yaxis == "mass":
-                    max_y = max(prof.header['star_mass'], max_y)
-                elif self.yaxis == "radius":
-                    max_y = max(prof.header['photosphere_r'], max_y)
-                # if given xlims, filter out profiles out of range add one
-                # profile to each side so data is shown at borders
-                if self.xlims is not None:
-                    x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
-                    if self.xlims[0] <= x_coord <= self.xlims[1]:
+            # Pass 1: determine the global vertical extent before interpolating
+            # anything. Include headers outside xlims so restricting the time
+            # range does not change the common mass/radius grid.
+            # read_data=False retains headers and column mappings, without loading
+            # numeric rows. Reuse these MesaData objects in pass 2 rather than
+            # constructing them again and reparsing each profile's preamble.
+            profiles = []
+            prof_include = [False] * len(self.profile_paths)
+            for i, profile_name in enumerate(self.profile_paths):
+                try:
+                    # Open each ZIP once and explicitly pass its borrowed handle
+                    # through both passes. Local profiles simply receive None.
+                    archive_path = md.get_archive_path(profile_name)
+                    archive = None
+                    if archive_path is not None:
+                        key = archive_path.resolve()
+                        if key not in archives:
+                            archives[key] = stack.enter_context(md.ZipFile(archive_path))
+                        archive = archives[key]
+                    prof = md.MesaData(profile_name, read_data=False, archive=archive)
+                    profiles.append((prof, archive))
+                    if self.yaxis == "mass":
+                        max_y = max(prof.header['star_mass'], max_y)
+                    elif self.yaxis == "radius":
+                        max_y = max(prof.header['photosphere_r'], max_y)
+                    # if given xlims, filter out profiles out of range add one
+                    # profile to each side so data is shown at borders
+                    if self.xlims is not None:
+                        x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
+                        if self.xlims[0] <= x_coord <= self.xlims[1]:
+                            prof_include[i] = True
+                            if i > 0:
+                                prof_include[i-1] = True
+                            if i+1 < len(self.profile_paths):
+                                prof_include[i+1] = True
+                    else:
                         prof_include[i] = True
-                        if i > 0:
-                            prof_include[i-1] = True
-                        if i+1 < len(self.profile_paths):
-                            prof_include[i+1] = True
+                except Exception as e:
+                    raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
+
+            # Keep the selected metadata in profile order, including neighbors
+            # needed to cover the plot borders. A deque lets pass 2 remove each
+            # object from the front in constant time as it is consumed.
+            profiles = deque(entry for entry, include in zip(profiles, prof_include) if include)
+            num_profiles = len(profiles)
+            assert num_profiles >= 2, (
+                "At least 2 profiles are required after header reading and selection; "
+                f"got {num_profiles}."
+            )
+
+            # array to interpolate data in the yaxis
+            y_interp = np.array([max_y * j / (self.yresolution-1) for j in range(self.yresolution)])
+
+            # now read the data
+            # "columns" is a list with the necessary columns that will be
+            # parsed from the profile*.data files
+            columns = []
+            if self.yaxis == "mass":
+                columns.append('mass')
+            elif self.yaxis == "radius":
+                columns.append('radius')
+
+            # call to extractor with return_data_columns = True only gives the
+            # required profile columns for the plot
+
+            # actual data is read later with the call to prof.read_data(columns)
+            columns.extend(self.extractor(self.identifier,
+                                               self.log10_on_data,
+                                               None, return_data_columns=True))
+
+            # Initialize interpolation grid
+            Z_data_array = np.zeros((self.yresolution, num_profiles))
+            self._log_density = np.full_like(Z_data_array, np.nan)
+            self._missing_density_profiles = []
+
+            # XY coordinates for data
+            X_data_array = np.zeros((self.yresolution, num_profiles))
+            Y_data_array = np.zeros((self.yresolution, num_profiles))
+            for j in range(self.yresolution):
+                Y_data_array[j, :] = max_y * j / (self.yresolution-1)
+            # Pass 2: load only selected profiles, using their cached column maps.
+            # Each body is read through the binary buffer and interpolated onto
+            # the common grid; raw numeric profiles are not accumulated in a cache.
+            for i in range(num_profiles):
+                # Removing the queue reference lets each completed profile be
+                # released after its interpolation, keeping bodies transient.
+                prof, archive = profiles.popleft()
+                profile_name = prof.filename
+                try:
+                    density_column = next((name for name in ("logRho", "rho")
+                                           if name in prof.columns), None)
+                    prof.read_data(columns + ([density_column] if density_column else []), archive=archive)
+                except Exception as e:
+                    raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
+                x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
+                if self.xaxis == "collapse" and x_coord > min_x_coord:
+                    print("Profiles are not decreasing in X coordinate!!!")
+                elif self.xaxis != "collapse" and x_coord < max_x_coord:
+                    print("Profiles are not increasing in X coordinate!!!")
+                max_x_coord = max(max_x_coord, x_coord)
+                min_x_coord = min(min_x_coord, x_coord)
+                if self.yaxis == "mass":
+                    _ = prof.header['star_mass']
+                elif self.yaxis == "radius":
+                    _ = prof.header['photosphere_r']
+
+                # fill up X positions
+                X_data_array[:, i] = x_coord
+
+                # read and interpolate data
+                if self.yaxis == "mass":
+                    y_data = prof.get('mass')
+                elif self.yaxis == "radius":
+                    y_data = prof.get('radius')
+                # reverse y_data and z_data for np.interp
+                y_data = y_data[::-1]
+                z_data = self.extractor(self.identifier, self.log10_on_data, prof)
+                z_data = z_data[::-1]
+                interp_z_data = np.interp(y_interp, y_data, z_data)
+
+                # set nans outside of range so there is no plotting (did not
+                # work, just plot a white region to cover things)
+
+                #for j in range(self.yresolution):
+                #    if (Y_data_array[j,i] > prof_y):
+                #        Z_data_array[j,i] = np.nan
+                #    else:
+                Z_data_array[:, i] = interp_z_data
+
+                if density_column is None:
+                    self._missing_density_profiles.append(str(profile_name))
                 else:
-                    prof_include[i] = True
-            except Exception as e:
-                raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
+                    log_density = prof.get(density_column)[::-1]
+                    if density_column == "rho":
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            log_density = np.log10(log_density)
+                    self._log_density[:, i] = np.interp(y_interp, y_data, log_density)
+                    # Do not extend density contours beyond this profile's surface.
+                    surface = prof.header['star_mass' if self.yaxis == "mass" else 'photosphere_r']
+                    self._log_density[y_interp > min(surface, y_data.max()), i] = np.nan
 
-        # Keep the selected metadata in profile order, including neighbors
-        # needed to cover the plot borders. A deque lets pass 2 remove each
-        # object from the front in constant time as it is consumed.
-        profiles = deque(prof for prof, include in zip(profiles, prof_include) if include)
-        num_profiles = len(profiles)
-        assert num_profiles >= 2, (
-            "At least 2 profiles are required after header reading and selection; "
-            f"got {num_profiles}."
-        )
+            XYZData = namedtuple('XYZData', 'xlims X Y Z')
+            return XYZData((min_x_coord, max_x_coord),
+                           X_data_array, Y_data_array, Z_data_array)
 
-        # array to interpolate data in the yaxis
-        y_interp = np.array([max_y * j / (self.yresolution-1) for j in range(self.yresolution)])
-
-        # now read the data
-        # "columns" is a list with the necessary columns that will be
-        # parsed from the profile*.data files
-        columns = []
-        if self.yaxis == "mass":
-            columns.append('mass')
-        elif self.yaxis == "radius":
-            columns.append('radius')
-
-        # call to extractor with return_data_columns = True only gives the
-        # required profile columns for the plot
-
-        # actual data is read later with the call to prof.read_data(columns)
-        columns.extend(self.extractor(self.identifier,
-                                           self.log10_on_data,
-                                           None, return_data_columns=True))
-
-        # Initialize interpolation grid
-        Z_data_array = np.zeros((self.yresolution, num_profiles))
-        self._log_density = np.full_like(Z_data_array, np.nan)
-        self._missing_density_profiles = []
-
-        # XY coordinates for data
-        X_data_array = np.zeros((self.yresolution, num_profiles))
-        Y_data_array = np.zeros((self.yresolution, num_profiles))
-        for j in range(self.yresolution):
-            Y_data_array[j, :] = max_y * j / (self.yresolution-1)
-        # Pass 2: load only selected profiles, using their cached column maps.
-        # Each body is read through the binary buffer and interpolated onto
-        # the common grid; raw numeric profiles are not accumulated in a cache.
-        for i in range(num_profiles):
-            # Removing the queue reference lets each completed profile be
-            # released after its interpolation, keeping bodies transient.
-            prof = profiles.popleft()
-            profile_name = prof.filename
-            try:
-                density_column = next((name for name in ("logRho", "rho")
-                                       if name in prof.columns), None)
-                prof.read_data(columns + ([density_column] if density_column else []))
-            except Exception as e:
-                raise RuntimeError(f"Couldn't read profile {profile_name}: {e}") from e
-            x_coord = self.function_on_xaxis(prof.header[self._xaxis_column] / xaxis_divide)
-            if self.xaxis == "collapse" and x_coord > min_x_coord:
-                print("Profiles are not decreasing in X coordinate!!!")
-            elif self.xaxis != "collapse" and x_coord < max_x_coord:
-                print("Profiles are not increasing in X coordinate!!!")
-            max_x_coord = max(max_x_coord, x_coord)
-            min_x_coord = min(min_x_coord, x_coord)
-            if self.yaxis == "mass":
-                _ = prof.header['star_mass']
-            elif self.yaxis == "radius":
-                _ = prof.header['photosphere_r']
-
-            # fill up X positions
-            X_data_array[:, i] = x_coord
-
-            # read and interpolate data
-            if self.yaxis == "mass":
-                y_data = prof.get('mass')
-            elif self.yaxis == "radius":
-                y_data = prof.get('radius')
-            # reverse y_data and z_data for np.interp
-            y_data = y_data[::-1]
-            z_data = self.extractor(self.identifier, self.log10_on_data, prof)
-            z_data = z_data[::-1]
-            interp_z_data = np.interp(y_interp, y_data, z_data)
-
-            # set nans outside of range so there is no plotting (did not
-            # work, just plot a white region to cover things)
-
-            #for j in range(self.yresolution):
-            #    if (Y_data_array[j,i] > prof_y):
-            #        Z_data_array[j,i] = np.nan
-            #    else:
-            Z_data_array[:, i] = interp_z_data
-
-            if density_column is None:
-                self._missing_density_profiles.append(str(profile_name))
-            else:
-                log_density = prof.get(density_column)[::-1]
-                if density_column == "rho":
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        log_density = np.log10(log_density)
-                self._log_density[:, i] = np.interp(y_interp, y_data, log_density)
-                # Do not extend density contours beyond this profile's surface.
-                surface = prof.header['star_mass' if self.yaxis == "mass" else 'photosphere_r']
-                self._log_density[y_interp > min(surface, y_data.max()), i] = np.nan
-
-        XYZData = namedtuple('XYZData', 'xlims X Y Z')
-        return XYZData((min_x_coord, max_x_coord),
-                       X_data_array, Y_data_array, Z_data_array)
 
     def plot(self, *,
              axis=None,

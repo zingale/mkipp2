@@ -2,7 +2,6 @@
 
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
-from contextvars import ContextVar
 from io import BufferedReader, TextIOWrapper
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
@@ -59,96 +58,59 @@ def resolve_logs_dir(log_dir):
     return str(path)
 
 
-# Readers can find the active session without passing a cache through every
-# function. ContextVar stores a value for the current execution context, so
-# separate threads do not share a single global session. The value is either
-# None or (archive_handles_by_path, owning_ExitStack); it caches open handles,
-# not profile data, and is cleared when the reading session ends.
-_archive_session = ContextVar("mkipp2_archive_session", default=None)
+def get_archive_path(filename):
+    """Return the ZIP parent of a virtual member path, or None for local files."""
+    # run.zip/LOGS/profile1.data is a virtual path: run.zip is the real file
+    # and LOGS/profile1.data names the member inside it.
+    return next((parent for parent in Path(filename).parents
+                 if parent.suffix.lower() == ".zip" and parent.is_file()), None)
 
 
 @contextmanager
-def _read_session():
-    """Keep ZIP handles open during one diagram's profile-loading operation.
+def _open_file(filename, archive=None):
+    """Open local bytes or a ZIP member, borrowing an explicitly supplied ZIP."""
+    archive_path = get_archive_path(filename)
+    if archive_path is None:
+        # Local LOGS files use no archive. Wrappers below provide buffering.
+        with open(filename, "rb", buffering=0) as stream:
+            yield stream
+        return
 
-    Member streams close after each read. The session closes its archives
-    when profile loading returns or raises an exception.
-    """
     with ExitStack() as stack:
-        # ExitStack owns any archives opened during this session and closes
-        # them on leaving the with block, even after an exception. Merely
-        # setting a ContextVar does not open or close any files.
-        token = _archive_session.set(({}, stack))
+        # A supplied archive belongs to the caller and stays open after this
+        # read. Standalone reads instead own and close their temporary ZIP.
+        if archive is None:
+            archive = stack.enter_context(ZipFile(archive_path))
+        member = Path(filename).relative_to(archive_path).as_posix()
+        if "/" not in member and member not in archive.namelist():
+            member = str(PurePosixPath(_archive_logs_root(archive)) / member)
         try:
-            yield
-        finally:
-            # The token restores the previous context value. Later independent
-            # reads must not see this session's cache of now-closing handles.
-            _archive_session.reset(token)
+            stream = stack.enter_context(archive.open(member))
+        except KeyError as exc:
+            raise FileNotFoundError(f"{filename}: ZIP member {member!r} not found") from exc
+        # Member streams always close after the read; no files are extracted.
+        yield stream
 
 
 @contextmanager
-def _open_file(filename):
-    """Open a local file or ZIP member as bytes, optionally reusing its archive."""
-    path = Path(filename)
-    # This stack owns the individual file/member stream. A ZIP archive is
-    # owned here only for a standalone read; shared archives belong to the
-    # profile-reading session and outlive each individual member stream.
-    with ExitStack() as stack:
-        # Virtual paths such as run.zip/LOGS/profile1.data contain a real ZIP
-        # among their parents. The remaining path identifies a member inside it.
-        for parent in path.parents:
-            if parent.suffix.lower() == ".zip" and parent.is_file():
-                member = path.relative_to(parent).as_posix()
-                session = _archive_session.get()
-                if session is None:
-                    # Standalone MesaData reads have no profile-reading session.
-                    # In that case this read opens and closes its own archive.
-                    archive = stack.enter_context(ZipFile(parent))
-                else:
-                    archives, owner = session
-                    # Canonical paths let equivalent archive paths reuse one
-                    # handle. Keeping it open avoids rebuilding the ZIP member
-                    # index for every profile header and numeric body.
-                    key = parent.resolve()
-                    if key not in archives:
-                        archives[key] = owner.enter_context(ZipFile(parent))
-                    archive = archives[key]
-                if "/" not in member and member not in archive.namelist():
-                    member = str(PurePosixPath(_archive_logs_root(archive)) / member)
-                # Each member is still streamed and closed separately. We
-                # neither extract files nor keep all profile bodies in memory.
-                try:
-                    stream = stack.enter_context(archive.open(member))
-                except KeyError as exc:
-                    raise FileNotFoundError(f"{filename}: ZIP member {member!r} not found") from exc
-                yield stream
-                return
-        # No archive parent means an ordinary LOGS file. It bypasses the ZIP
-        # cache completely. Open raw bytes here; the text/numeric wrappers below
-        # provide the appropriate buffering rather than buffering twice.
-        yield stack.enter_context(open(filename, "rb", buffering=0))
-
-
-@contextmanager
-def _open_text(filename):
+def _open_text(filename, archive=None):
     """Decode metadata without prefetching a large part of the numeric body."""
     # Only the short MESA preamble needs strings for header/column names.
     # Avoid the large numeric buffer here: metadata-only reads should not
     # decompress a megabyte of a profile that may later be excluded by xlims.
-    with _open_file(filename) as stream, TextIOWrapper(stream) as text:
+    with _open_file(filename, archive=archive) as stream, TextIOWrapper(stream) as text:
         yield text
 
 
 @contextmanager
-def _open_binary(filename):
+def _open_binary(filename, archive=None):
     """Buffer numeric byte lines for NumPy without intermediate text decoding."""
     # The MESA file remains text; binary mode means NumPy receives byte lines
     # instead of Python strings decoded by TextIOWrapper. Reading raw ZIP
     # lines one at a time is slow, so prefetch up to 1 MiB and serve lines from
     # that buffer. This works for both ZIP members and ordinary LOGS files,
     # with buffering independent of the full file size.
-    with _open_file(filename) as stream, BufferedReader(stream, buffer_size=1024*1024) as binary:
+    with _open_file(filename, archive=archive) as stream, BufferedReader(stream, buffer_size=1024*1024) as binary:
         yield binary
 
 
@@ -172,6 +134,10 @@ class MesaData:
     clean_data : bool, optional
         Remove history rows superseded by later backups or restarts.
         Default is True. Applies only when a ``model_number`` column exists.
+    archive : zipfile.ZipFile, optional
+        Already-open ZIP containing this file. Borrowed for this read only;
+        the caller owns and closes it. Deferred calls to `read_data` must
+        receive the handle again to reuse it. Local files ignore this option.
 
     Attributes
     ----------
@@ -208,7 +174,7 @@ class MesaData:
 
     def __init__(self, history_file, *,
                  only_read_header=False, read_data=True, read_data_cols=None,
-                 clean_data=True):
+                 clean_data=True, archive=None):
         """Read file metadata and optionally load the requested columns."""
         if read_data_cols is None:
             read_data_cols = []
@@ -225,7 +191,7 @@ class MesaData:
         self.columns = {}
         columns = []
 
-        with _open_text(self.filename) as file:
+        with _open_text(self.filename, archive=archive) as file:
 
             # first line is not used
             file.readline()
@@ -261,9 +227,9 @@ class MesaData:
 
         if len(read_data_cols) == 0:
             read_data_cols = columns
-        self.read_data(read_data_cols, clean_data=clean_data)
+        self.read_data(read_data_cols, clean_data=clean_data, archive=archive)
 
-    def read_data(self, column_names, clean_data=True, sample_every_n=1):
+    def read_data(self, column_names, clean_data=True, sample_every_n=1, *, archive=None):
         """Load selected columns, optionally cleaning and sampling history rows.
 
         Parameters
@@ -279,6 +245,10 @@ class MesaData:
             always retaining the first and last rows. Default is 1, which
             disables sampling. Sampling requires a ``model_number`` column
             and more than two rows.
+        archive : zipfile.ZipFile, optional
+            Already-open ZIP containing this file. The caller retains ownership;
+            this method closes only the member stream. Defaults to opening
+            a temporary archive for this call. Local files ignore this option.
 
         Raises
         ------
@@ -314,7 +284,7 @@ class MesaData:
         # skiprows still consumes the six preamble lines, but does not parse
         # their names again. usecols converts only requested numeric fields;
         # all file bytes still have to be scanned (and decompressed for ZIPs).
-        with _open_binary(self.filename) as file:
+        with _open_binary(self.filename, archive=archive) as file:
             data = np.loadtxt(file, skiprows=6,
                               usecols=tuple([self.columns[k] for k in column_names]),
                               unpack=True)
