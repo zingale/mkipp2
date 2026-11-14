@@ -1,8 +1,8 @@
 """Read selected columns from MESA text output and resolve profile paths."""
 
 from collections import OrderedDict
-from contextlib import contextmanager
-from io import TextIOWrapper
+from contextlib import ExitStack, contextmanager
+from io import BufferedReader, TextIOWrapper
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
@@ -58,25 +58,60 @@ def resolve_logs_dir(log_dir):
     return str(path)
 
 
+def get_archive_path(filename):
+    """Return the ZIP parent of a virtual member path, or None for local files."""
+    # run.zip/LOGS/profile1.data is a virtual path: run.zip is the real file
+    # and LOGS/profile1.data names the member inside it.
+    return next((parent for parent in Path(filename).parents
+                 if parent.suffix.lower() == ".zip" and parent.is_file()), None)
+
+
 @contextmanager
-def _open_text(filename):
-    """Stream a local file or ZIP member, closing all handles on exit."""
-    path = Path(filename)
-    for parent in path.parents:
-        if parent.suffix.lower() == ".zip" and parent.is_file():
-            member = path.relative_to(parent).as_posix()
-            with ZipFile(parent) as archive:
-                if "/" not in member and member not in archive.namelist():
-                    member = str(PurePosixPath(_archive_logs_root(archive)) / member)
-                try:
-                    stream = archive.open(member)
-                except KeyError as exc:
-                    raise FileNotFoundError(f"{filename}: ZIP member {member!r} not found") from exc
-                with stream, TextIOWrapper(stream) as text:
-                    yield text
-            return
-    with open(filename) as text:
+def _open_file(filename, archive=None):
+    """Open local bytes or a ZIP member, borrowing an explicitly supplied ZIP."""
+    archive_path = get_archive_path(filename)
+    if archive_path is None:
+        # Local LOGS files use no archive. Wrappers below provide buffering.
+        with open(filename, "rb", buffering=0) as stream:
+            yield stream
+        return
+
+    with ExitStack() as stack:
+        # A supplied archive belongs to the caller and stays open after this
+        # read. Standalone reads instead own and close their temporary ZIP.
+        if archive is None:
+            archive = stack.enter_context(ZipFile(archive_path))
+        member = Path(filename).relative_to(archive_path).as_posix()
+        if "/" not in member and member not in archive.namelist():
+            member = str(PurePosixPath(_archive_logs_root(archive)) / member)
+        try:
+            stream = stack.enter_context(archive.open(member))
+        except KeyError as exc:
+            raise FileNotFoundError(f"{filename}: ZIP member {member!r} not found") from exc
+        # Member streams always close after the read; no files are extracted.
+        yield stream
+
+
+@contextmanager
+def _open_text(filename, archive=None):
+    """Decode metadata without prefetching a large part of the numeric body."""
+    # Only the short MESA preamble needs strings for header/column names.
+    # Avoid the large numeric buffer here: metadata-only reads should not
+    # decompress a megabyte of a profile that may later be excluded by xlims.
+    with _open_file(filename, archive=archive) as stream, TextIOWrapper(stream) as text:
         yield text
+
+
+@contextmanager
+def _open_binary(filename, archive=None):
+    """Buffer numeric byte lines for NumPy without intermediate text decoding."""
+    # The MESA file remains text; binary mode means NumPy receives byte lines
+    # instead of Python strings decoded by TextIOWrapper. Reading raw ZIP
+    # lines one at a time is slow, so prefetch up to 1 MiB and serve lines from
+    # that buffer. This works for both ZIP members and ordinary LOGS files,
+    # with buffering independent of the full file size.
+    with _open_file(filename, archive=archive) as stream, BufferedReader(stream, buffer_size=1024*1024) as binary:
+        yield binary
 
 
 class MesaData:
@@ -99,6 +134,10 @@ class MesaData:
     clean_data : bool, optional
         Remove history rows superseded by later backups or restarts.
         Default is True. Applies only when a ``model_number`` column exists.
+    archive : zipfile.ZipFile, optional
+        Already-open ZIP containing this file. Borrowed for this read only;
+        the caller owns and closes it. Deferred calls to `read_data` must
+        receive the handle again to reuse it. Local files ignore this option.
 
     Attributes
     ----------
@@ -135,7 +174,7 @@ class MesaData:
 
     def __init__(self, history_file, *,
                  only_read_header=False, read_data=True, read_data_cols=None,
-                 clean_data=True):
+                 clean_data=True, archive=None):
         """Read file metadata and optionally load the requested columns."""
         if read_data_cols is None:
             read_data_cols = []
@@ -152,7 +191,7 @@ class MesaData:
         self.columns = {}
         columns = []
 
-        with _open_text(self.filename) as file:
+        with _open_text(self.filename, archive=archive) as file:
 
             # first line is not used
             file.readline()
@@ -188,9 +227,9 @@ class MesaData:
 
         if len(read_data_cols) == 0:
             read_data_cols = columns
-        self.read_data(read_data_cols, clean_data=clean_data)
+        self.read_data(read_data_cols, clean_data=clean_data, archive=archive)
 
-    def read_data(self, column_names, clean_data=True, sample_every_n=1):
+    def read_data(self, column_names, clean_data=True, sample_every_n=1, *, archive=None):
         """Load selected columns, optionally cleaning and sampling history rows.
 
         Parameters
@@ -206,6 +245,10 @@ class MesaData:
             always retaining the first and last rows. Default is 1, which
             disables sampling. Sampling requires a ``model_number`` column
             and more than two rows.
+        archive : zipfile.ZipFile, optional
+            Already-open ZIP containing this file. The caller retains ownership;
+            this method closes only the member stream. Defaults to opening
+            a temporary archive for this call. Local files ignore this option.
 
         Raises
         ------
@@ -237,8 +280,11 @@ class MesaData:
 
         self.read_columns = column_names
 
-        # read data
-        with _open_text(self.filename) as file:
+        # Reopen the body as buffered bytes and reuse the stored column map.
+        # skiprows still consumes the six preamble lines, but does not parse
+        # their names again. usecols converts only requested numeric fields;
+        # all file bytes still have to be scanned (and decompressed for ZIPs).
+        with _open_binary(self.filename, archive=archive) as file:
             data = np.loadtxt(file, skiprows=6,
                               usecols=tuple([self.columns[k] for k in column_names]),
                               unpack=True)
