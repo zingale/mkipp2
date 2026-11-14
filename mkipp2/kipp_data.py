@@ -163,7 +163,9 @@ class Zone:
             if (new_max_y <= old_max_y and new_max_y >= old_min_y) or \
                (new_min_y <= old_max_y and new_min_y >= old_min_y) or \
                (new_max_y > old_max_y and new_min_y < old_min_y):
-                # associate vertices
+                # Replace the shared vertical edge with links between the
+                # old and new outer boundaries. Any change in layer height
+                # remains a vertical step in the stitched boundary.
                 old_upper.next_vertex = upper_vertex
                 upper_vertex.prev_vertex = old_upper
                 lower_vertex.next_vertex = old_lower
@@ -173,7 +175,9 @@ class Zone:
                 if (new_max_y <= old_max_y and new_max_y >= old_min_y) and \
                    (new_min_y <= old_max_y and new_min_y >= old_min_y):
                     return True
-                # otherwise, switch lower vertex
+                # The new block bridges more than one predecessor. Carry
+                # the old upper corner forward as the lower connection for
+                # the next splice, preserving boundary loops around gaps.
                 lower_vertex = old_upper
                 found = True
         return found
@@ -218,6 +222,9 @@ class Zone:
         for block in self.old_blocks:
             vertices.extend(block.vertices)
 
+        # Follow each unvisited boundary loop exactly once. Splits and
+        # merges may leave multiple loops, including holes; separate MOVETO
+        # and CLOSEPOLY codes retain them in one compound Matplotlib path.
         for starting_vertex in vertices:
             if starting_vertex.checked:
                 continue
