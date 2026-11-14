@@ -1001,7 +1001,6 @@ class KippenhahnDiagram:
             return XYZData((min_x_coord, max_x_coord),
                            X_data_array, Y_data_array, Z_data_array)
 
-
     def plot(self, *,
              axis=None,
              contour_colormap=None,
